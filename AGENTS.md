@@ -8,8 +8,9 @@ before making changes.
 **Margin** is a two-device AI reading companion:
 
 - **X4 Pro** — an ESP32-S3 e-reader. Primary visual reading surface. Firmware
-  lives in [firmware-x4/](firmware-x4/) and is a **fork of CrossPoint** (the
-  existing XTEINK reader firmware). See [docs/forking.md](docs/forking.md).
+  lives in [firmware-x4/](firmware-x4/) and is **Muse**, our **fork of
+  CrossPoint** (the existing XTEINK reader firmware). See
+  [docs/forking.md](docs/forking.md).
 - **iPhone app** — the invisible compute + audio brain. Lives in [ios/](ios/)
   and is expected to **fork/reuse CrossX** (the existing XTEINK companion app).
   Requires macOS + Xcode to build.

@@ -36,3 +36,12 @@ implementations must reproduce.
 
 > This is the foundational technical decision of the product. Page numbers are
 > not stable; everything anchors to normalized book text.
+
+### Conformance fixture
+
+`canonicalization/fixtures/meditations-pg2680.epub` — **Meditations** by Marcus
+Aurelius, [Project Gutenberg #2680](https://www.gutenberg.org/ebooks/2680)
+(public domain in the US; Project Gutenberg License). EPUB, `en`, 20 spine items,
+sha256 `06FF0889DDF9C29E079056E931FEF9D976CA8335BC6CC485A23F1B153C196353`.
+Both Muse (firmware) and the Margin app must normalize this exact file to
+identical offsets/hashes.

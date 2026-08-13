@@ -1,11 +1,15 @@
-# firmware-x4 — X4 Pro firmware (ESP32-S3)
+# firmware-x4 — Muse (X4 Pro firmware, ESP32-S3)
 
-A **fork of CrossPoint** (the XTEINK reader firmware) with Margin-specific
-additions kept in isolated modules. See [../docs/forking.md](../docs/forking.md)
-and [../docs/hardware.md](../docs/hardware.md).
+**Muse** is Margin's X4 Pro firmware: a **fork of CrossPoint** (the XTEINK reader
+firmware) with Margin-specific additions kept in isolated modules. See
+[../docs/forking.md](../docs/forking.md) and
+[../docs/hardware.md](../docs/hardware.md).
 
-> Upstream not yet imported. Do the license/architecture review and record the
-> fork ref in [../docs/forking.md](../docs/forking.md) before importing.
+> **Working tree is not vendored.** The CrossPoint clone (~60 MB) lives at
+> `firmware-x4/crosspoint/` and is **git-ignored**. Reconstruct it on any machine
+> with `./tools/setup-crosspoint.sh` (clones CrossPoint, pins `freeink-sdk`, and
+> applies our tracked overlay [`firmware-x4/platformio.local.ini`](platformio.local.ini),
+> which adds the `x4pro` build env). Then build with `./tools/build-firmware.sh`.
 
 ## Margin modules (isolated from upstream)
 

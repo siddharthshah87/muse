@@ -49,12 +49,19 @@ echo "Upgrading pip and installing esptool..."
 "$VENV_PY" -m pip install --upgrade pip >/dev/null
 "$VENV_PY" -m pip install --upgrade esptool
 
+# PlatformIO for building custom firmware. Pin click<8.2: PlatformIO 6.1.x
+# monkeypatches click.secho, which newer click releases break.
+echo "Installing PlatformIO Core (+ pinned click)..."
+"$VENV_PY" -m pip install --upgrade platformio "click==8.1.7"
+
 echo ""
-echo "esptool ready: $("$VENV_PY" -m esptool version 2>&1 | head -n1)"
-echo "Virtualenv:    $VENV"
+echo "esptool ready:    $("$VENV_PY" -m esptool version 2>&1 | head -n1)"
+echo "PlatformIO ready: $("$VENV_PY" -m platformio --version 2>&1 | head -n1)"
+echo "Virtualenv:       $VENV"
 echo ""
 echo "On Linux you may need serial permissions:  sudo usermod -aG dialout \"\$USER\"  (then re-login)"
 echo ""
 echo "Next steps (use the venv Python):"
 echo "  $VENV_PY tools/identify_device.py   # read-only chip identify"
 echo "  $VENV_PY tools/backup_flash.py      # full factory backup (before any write)"
+echo "  ./tools/build-firmware.sh           # build custom X4 Pro firmware"

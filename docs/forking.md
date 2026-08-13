@@ -4,12 +4,16 @@ Margin is **not greenfield**. Both device halves start from existing XTEINK
 projects. This document defines how we fork, isolate, and maintain them so we get
 a working product quickly without inheriting an unmaintainable divergence.
 
+**Names:** the product/system is **Margin**. Our X4 Pro firmware fork of
+CrossPoint is named **Muse** (lives in [firmware-x4/](../firmware-x4/)). The iOS
+half is the **Margin app** (forking/reusing CrossX).
+
 ## What we are forking
 
-| Half | Upstream | Our home | Language / platform |
+| Half | Upstream | Our fork | Language / platform |
 |------|----------|----------|---------------------|
-| X4 Pro firmware | **CrossPoint** ([crosspoint-reader/crosspoint-reader](https://github.com/crosspoint-reader/crosspoint-reader), **MIT**) | [firmware-x4/](../firmware-x4/) | C/C++ on **PlatformIO/pioarduino + Arduino** (ESP32-S3) |
-| iPhone companion | **CrossX** ([jtvargas/crosspoint-app](https://github.com/jtvargas/crosspoint-app), **MIT**, community/3rd-party) | [ios/](../ios/) | SwiftUI, multiplatform (requires macOS + **Xcode 26 / iOS 26**) |
+| X4 Pro firmware (**Muse**) | **CrossPoint** ([crosspoint-reader/crosspoint-reader](https://github.com/crosspoint-reader/crosspoint-reader), **MIT**) | [firmware-x4/](../firmware-x4/) | C/C++ on **PlatformIO/pioarduino + Arduino** (ESP32-S3) |
+| iPhone companion (**Margin app**) | **CrossX** ([jtvargas/crosspoint-app](https://github.com/jtvargas/crosspoint-app), **MIT**, community/3rd-party) | [ios/](../ios/) | SwiftUI, multiplatform (requires macOS + **Xcode 26 / iOS 26**) |
 
 > **CrossPoint is MIT-licensed** — permissive, we can fork freely. **CrossX** is
 > also **MIT** but is a **community app by jtvargas, not an official CrossPoint

@@ -1,0 +1,13 @@
+# Normalize line endings. Scripts must stay LF so they run on Ubuntu/macOS.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.ps1  text eol=crlf
+
+# Binary assets — never touch.
+*.bin  binary
+*.epub binary
+*.docx binary
+*.png  binary
+*.jpg  binary
