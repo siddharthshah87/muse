@@ -1,0 +1,13 @@
+{
+  "created_utc": "2026-08-13T19:52:00.337226+00:00",
+  "file": "x4pro-factory-20260813-123626.bin",
+  "sha256": "2a97ac4c0acf8aab458aa14dbbac25c3c2a14da834f86d91df4099abbab3fcee",
+  "size_bytes": 16777216,
+  "flash_size_mb": 16,
+  "chip": null,
+  "mac": "7c:0c:5f:41:8e:00",
+  "port": "COM4",
+  "baud": 460800,
+  "esptool": "esptool v5.3.1",
+  "note": "Full factory flash dump. See docs/recovery-x4.md to restore."
+}
