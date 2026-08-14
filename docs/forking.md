@@ -69,8 +69,8 @@ Record what we forked and every delta. Keep this table current.
 
 | Component | Upstream ref (commit/tag) | Date | Notes |
 |-----------|---------------------------|------|-------|
-| CrossPoint | [crosspoint-reader/crosspoint-reader](https://github.com/crosspoint-reader/crosspoint-reader) `develop` (MIT), v1.5.0 era | 2026-08-13 | Firmware base. PlatformIO/pioarduino. Record exact SHA when we import. |
-| freeink-sdk | [Free-Ink/freeink-sdk](https://github.com/Free-Ink/freeink-sdk) `main` (submodule) | 2026-08-13 | HAL; provides `XTEINK_X4_PRO` profile. |
+| CrossPoint | [crosspoint-reader/crosspoint-reader](https://github.com/crosspoint-reader/crosspoint-reader) `feat-x4-papermono-support` @ `9cfdaa46` (MIT), PR #2983 | 2026-08-13 | Firmware base. Contains official X4 Pro `[env:x4pro]` with display/touch/frontlight support. |
+| freeink-sdk | [Free-Ink/freeink-sdk](https://github.com/Free-Ink/freeink-sdk) `main` @ `58d34b37` (submodule) | 2026-08-13 | HAL; provides `XTEINK_X4_PRO` profile. |
 | CrossX | [jtvargas/crosspoint-app](https://github.com/jtvargas/crosspoint-app) `main` (MIT, community) | 2026-08-13 | iOS companion base. SwiftUI/MVVM. Xcode 26/iOS 26. HTTP/WiFi only. |
 
 ## CrossX reuse map & gaps (iOS)
@@ -104,9 +104,10 @@ hotspot only** — no BLE — so `DeviceBridge` must add the BLE path itself.
 - **BLE is disabled in mainline** (`lib_ignore = BLE` in `platformio.ini`).
   Margin's control channel needs BLE — we must enable/add it in our fork
   (`device_protocol/`). The ESP32-S3 supports BT 5 LE.
-- **No X4 Pro env in crosspoint's `platformio.ini` yet** — only C3 envs
-  (`default`, `slim`) and the S3 `sticky` env exist. We add an `x4pro` env
-  modeled on `sticky` + `freeink-sdk`'s sample `[env:x4pro]`.
+- **No X4 Pro env in crosspoint's `platformio.ini` yet** — ~~only C3 envs~~
+  **RESOLVED**: PR #2983 (`feat-x4-papermono-support`) adds the official `[env:x4pro]`.
+  We pin to that branch. Our `platformio.local.ini` adds only the partition table
+  and `-DMUSE_BUILD=1`.
 - **Dual-boot nuance**: the device boots **app1** (OEM). A custom build flashed to
   app0 @ `0x10000` only boots if `otadata` selects app0 — keeps OEM in app1 as a
   fallback. See [hardware.md](hardware.md).
