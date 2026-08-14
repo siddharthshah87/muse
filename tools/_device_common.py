@@ -30,22 +30,31 @@ def pick_port() -> str | None:
     """Best-effort auto-detect of the X4 Pro serial port.
 
     Prefers a port whose USB VID/PID matches the ESP32-S3 native USB. Falls back
-    to the sole available port if there is exactly one.
+    to the sole available *USB* port if there is exactly one.  Built-in kernel
+    serial ports (/dev/ttyS*, /dev/ttyAMA*, COM1-COM4 on Windows) are excluded
+    from the fallback — they have no USB VID and are never the X4 Pro.
     """
     ports = list_ports()
     if not ports:
         return None
 
+    # VID/PID exact match — most reliable.
     esp = [p for p in ports if getattr(p, "vid", None) == ESP_VID and getattr(p, "pid", None) == ESP_PID]
     if len(esp) >= 1:
         if len(esp) > 1:
             print(f"Multiple ESP32-S3 ports; using {esp[0].device}. Override with --port.", file=sys.stderr)
         return esp[0].device
 
-    if len(ports) == 1:
-        return ports[0].device
+    # Fallback: any port that has a USB VID (filters out ttyS*, ttyAMA*, COM1-4…)
+    usb = [p for p in ports if getattr(p, "vid", None) is not None]
+    if len(usb) == 1:
+        return usb[0].device
+    if len(usb) > 1:
+        print("Multiple USB serial ports found; specify one with --port:", file=sys.stderr)
+        for p in usb:
+            vid = f"{p.vid:04X}" if p.vid else "????"
+            pid = f"{p.pid:04X}" if p.pid else "????"
+            print(f"  {p.device}  VID:{vid} PID:{pid}  {p.description}", file=sys.stderr)
+        return None
 
-    print("Multiple serial ports found; specify one with --port:", file=sys.stderr)
-    for p in ports:
-        print(f"  {p.device}  {p.description}", file=sys.stderr)
     return None
