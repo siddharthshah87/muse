@@ -38,15 +38,24 @@ Usually `esptool` triggers download mode automatically via the USB control
 lines. If a manual entry is ever required: hold **BOOT**, tap **RESET**, release
 **BOOT** (exact buttons/labels on the X4 Pro to be confirmed and added here).
 
-## USB-Serial/JTAG read_flash quirk (important)
+## USB-Serial/JTAG flash quirks (write + read)
 
-Reading flash over the ESP32-S3 **native USB-Serial/JTAG** with the stub flasher
-stalls consistently at ~0x9A000 with `Packet content transfer stopped`,
-regardless of baud. Workaround (implemented in `tools/backup_flash.py`):
+**Write (flashing firmware):** Use `--before usb-reset --after no-reset --no-stub`.
 
-- Read with **`--no-stub`** (slower, ~170 kbit/s, but reliable).
-- Read in **chunks with per-chunk retries** so a transient stall doesn't lose
-  the whole dump.
+- `--before usb-reset` — sends a USB control transfer to enter ROM download mode
+  automatically. DTR/RTS toggling doesn't work on native USB (the port disappears
+  mid-reset before esptool can re-connect). `usb-reset` is reliable with no
+  manual button sequence.
+- `--no-stub` — the stub flasher upload stalls on this interface (see read quirk
+  below). Without it, the ROM handles writes directly.
+- `--after no-reset` on the firmware step keeps the device in bootloader so the
+  second esptool call (otadata) can use `--before no-reset`. The final otadata
+  write uses `--after hard-reset` to reboot into the new firmware.
+
+**Read (backup/verify):** Use `--no-stub` and read in chunks with per-chunk
+retries — the read stalls consistently at ~0x9A000 with `Packet content transfer
+stopped` if read as one continuous stream. Both workarounds are implemented in
+`tools/backup_flash.py`.
 
 ## Still to confirm on the device
 

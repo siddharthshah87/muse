@@ -79,8 +79,12 @@ def build_otadata() -> bytes:
     return sector0 + sector1
 
 
-def run_esptool(port: str, args: list[str], *, dry_run: bool = False) -> None:
-    cmd = [sys.executable, "-m", "esptool", "--chip", "esp32s3", "--port", port] + args
+def run_esptool(port: str, args: list[str], *, dry_run: bool = False,
+                after: str = "no-reset") -> None:
+    cmd = [sys.executable, "-m", "esptool",
+           "--chip", "esp32s3", "--port", port,
+           "--before", "usb-reset", "--after", after,
+           "--no-stub"] + args
     print("  $", " ".join(cmd))
     if not dry_run:
         subprocess.run(cmd, check=True)
@@ -98,15 +102,18 @@ def flash(port: str, firmware: pathlib.Path, *, dry_run: bool = False) -> None:
 
     print()
     print("── Step 1: flash firmware.bin → app0 @ 0x10000 ──")
-    run_esptool(port, ["write_flash", hex(APP0_OFFSET), str(firmware)], dry_run=dry_run)
+    run_esptool(port, ["write-flash", "--flash-mode", "dio", "--flash-size", "16MB",
+                       hex(APP0_OFFSET), str(firmware)], dry_run=dry_run)
 
     print()
-    print("── Step 2: write otadata → 0xe000 (boots ota_0) ──")
-    run_esptool(port, ["write_flash", hex(OTADATA_OFFSET), str(otadata_path)], dry_run=dry_run)
+    print("── Step 2: write otadata → 0xe000 (boots ota_0), then reboot ──")
+    run_esptool(port, ["write-flash", "--flash-mode", "dio", "--flash-size", "16MB",
+                       hex(OTADATA_OFFSET), str(otadata_path)],
+                dry_run=dry_run, after="hard-reset")
 
     if not dry_run:
         print()
-        print("✓  Done. Reset the device — it should now boot Muse (app0).")
+        print("✓  Done. Device is rebooting into Muse (app0).")
         print("   OEM firmware remains intact in app1 @ 0x7F0000.")
         print("   To restore OEM: python tools/restore_flash.py")
 
