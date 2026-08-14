@@ -24,6 +24,9 @@ import subprocess
 import sys
 import zlib
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _device_common import esptool_cmd, pick_port  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Project layout
 # ---------------------------------------------------------------------------
@@ -81,10 +84,11 @@ def build_otadata() -> bytes:
 
 def run_esptool(port: str, args: list[str], *, dry_run: bool = False,
                 after: str = "no-reset") -> None:
-    cmd = [sys.executable, "-m", "esptool",
-           "--chip", "esp32s3", "--port", port,
-           "--before", "usb-reset", "--after", after,
-           "--no-stub"] + args
+    cmd = esptool_cmd(
+        ["--chip", "esp32s3", "--port", port,
+         "--before", "usb-reset", "--after", after,
+         "--no-stub"] + args
+    )
     print("  $", " ".join(cmd))
     if not dry_run:
         subprocess.run(cmd, check=True)
@@ -119,9 +123,6 @@ def flash(port: str, firmware: pathlib.Path, *, dry_run: bool = False) -> None:
 
 
 def main() -> None:
-    sys.path.insert(0, str(REPO_ROOT / "tools"))
-    from _device_common import pick_port
-
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", help="Serial port (auto-detected if omitted)")
     parser.add_argument("--firmware", type=pathlib.Path, default=DEFAULT_FIRMWARE,

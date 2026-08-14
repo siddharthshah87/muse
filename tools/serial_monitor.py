@@ -45,10 +45,12 @@ def main() -> int:
         return 1
 
     if not args.no_reset:
-        # esptool handles the USB-Serial/JTAG reset sequence correctly.
+        # usb-reset is the only reliable way to reset the ESP32-S3 native USB.
+        # chip-id with --after hard_reset doesn't work (DTR/RTS are virtual).
         subprocess.run(
             [sys.executable, "-m", "esptool", "--port", port,
-             "--after", "hard_reset", "--connect-attempts", "2", "chip-id"],
+             "--before", "usb-reset", "--after", "hard-reset",
+             "--no-stub", "chip-id"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 

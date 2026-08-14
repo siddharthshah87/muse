@@ -5,16 +5,23 @@ serial port on Windows (incl. Git Bash), Ubuntu, and macOS.
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 
 # ESP32-S3 native USB identifiers (Espressif).
 ESP_VID = 0x303A
 ESP_PID = 0x1001
 
+# Prefer the project venv's Python (esptool v5+, uses write-flash / usb_reset
+# syntax) over the system Python (may have esptool v4 with write_flash syntax).
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_VENV_PYTHON = _REPO_ROOT / ".venv" / "bin" / "python"
+_ESPTOOL_PYTHON = str(_VENV_PYTHON) if _VENV_PYTHON.exists() else sys.executable
+
 
 def esptool_cmd(args: list[str]) -> list[str]:
-    """Return an argv list that invokes esptool via the current interpreter."""
-    return [sys.executable, "-m", "esptool", *args]
+    """Return an argv list that invokes esptool via the venv interpreter."""
+    return [_ESPTOOL_PYTHON, "-m", "esptool", *args]
 
 
 def list_ports():
