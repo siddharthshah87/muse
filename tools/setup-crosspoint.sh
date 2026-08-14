@@ -31,7 +31,10 @@ git -C "$DEST/freeink-sdk" fetch --depth 50 origin main
 git -C "$DEST/freeink-sdk" checkout "$FREEINK_SDK_REF"
 git -C "$DEST/freeink-sdk" submodule update --init --recursive
 
-# Apply our tracked overlay (adds the x4pro build env).
-cp "$REPO_ROOT/firmware-x4/platformio.local.ini" "$DEST/platformio.local.ini"
+# Apply our tracked overlay (adds the x4pro build env + correct X4 Pro partition table).
+# Both files must land in the crosspoint root so PlatformIO can find them.
+cp "$REPO_ROOT/firmware-x4/platformio.local.ini"  "$DEST/platformio.local.ini"
+cp "$REPO_ROOT/firmware-x4/partitions_x4pro.csv"  "$DEST/partitions_x4pro.csv"
 echo "Applied overlay -> $DEST/platformio.local.ini"
+echo "Applied overlay -> $DEST/partitions_x4pro.csv"
 echo "Done. Build with: ./tools/build-firmware.sh"

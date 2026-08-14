@@ -115,7 +115,8 @@ hotspot only** — no BLE — so `DeviceBridge` must add the BLE path itself.
 
 | Component | File | Change | Reason | Upstreamable? |
 |-----------|------|--------|--------|---------------|
-| _n/a yet_ | | | | |
+| Muse overlay | `platformio.local.ini` (added) | New file — `[env:x4pro]` env: S3 board, X4 Pro device flags, correct partition table | CrossPoint has no x4pro env; using C3 table causes bootloops | No (product-specific) |
+| Muse overlay | `partitions_x4pro.csv` (added) | X4 Pro partition layout: app 7.875 MB × 2, app1 @ 0x7F0000 | CrossPoint's `partitions.csv` is for the C3 (6.25 MB apps, app1 @ 0x650000) — mismatch causes bootloops | No (device-specific) |
 
 ## Non-goals for the fork
 

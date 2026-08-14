@@ -1,0 +1,18 @@
+# X4 Pro (ESP32-S3) partition table — matches the factory flash exactly.
+# Recovered from the OEM dump; confirmed in docs/hardware.md and
+# freeink-sdk/docs/xteink-x4pro-support.md.
+#
+# IMPORTANT: this differs from CrossPoint's default partitions.csv (C3 devices):
+#   - app partitions are 7.875 MB each (vs 6.25 MB on C3)
+#   - app1 is at 0x7F0000 (vs 0x650000 on C3)
+#   - spiffs/coredump are at correspondingly higher offsets
+# Using the wrong table causes bootloops: the bootloader finds app1 (OEM) at
+# the wrong offset and either panics or rolls back in an infinite loop.
+#
+# Name,   Type,    SubType,  Offset,   Size,     Flags
+nvs,      data,    nvs,      0x9000,   0x5000,
+otadata,  data,    ota,      0xe000,   0x2000,
+app0,     app,     ota_0,    0x10000,  0x7E0000,
+app1,     app,     ota_1,    0x7F0000, 0x7E0000,
+spiffs,   data,    spiffs,   0xFD0000, 0x014000,
+coredump, data,    coredump, 0xFE4000, 0x01C000,
