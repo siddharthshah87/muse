@@ -13,7 +13,7 @@ DEST="$REPO_ROOT/firmware-x4/crosspoint"
 
 # Pinned upstream refs (update these deliberately; see docs/forking.md).
 CROSSPOINT_URL="https://github.com/crosspoint-reader/crosspoint-reader.git"
-CROSSPOINT_REF="4970ef1f6b1ead0047d2d206eb2d21fca91a9676"   # develop @ 2026-08-13
+CROSSPOINT_REF="9cfdaa46a1914370730e73b7f83461387a65925e"   # feat-x4-papermono-support @ 2026-08-13 (PR #2983)
 FREEINK_SDK_REF="4ff75b2baf4930392898a98392329ebec963a125"  # freeink-sdk main @ 2026-08-13
 
 if [ -d "$DEST/.git" ]; then
