@@ -1,0 +1,23 @@
+{
+  "name": "margin-companion",
+  "version": "1.0.0",
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "ios": "expo run:ios",
+    "build:dev": "eas build --profile development --platform ios"
+  },
+  "dependencies": {
+    "expo": "~52.0.0",
+    "expo-speech": "~13.0.0",
+    "expo-status-bar": "~2.0.0",
+    "react": "18.3.2",
+    "react-native": "0.76.5",
+    "react-native-ble-plx": "^3.4.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.0",
+    "@types/react": "~18.3.0",
+    "typescript": "^5.3.0"
+  }
+}

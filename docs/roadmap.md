@@ -26,9 +26,25 @@ Exit: factory flash backed up and restorable; a custom "Hello" build boots.
 
 Prove synchronized narration between X4 and iPhone.
 
-- Open a known EPUB on X4; expose current canonical locator.
-- iPhone narrates the current paragraph; X4 highlights the active phrase.
-- Pause/resume and manual page change work.
+- [x] Expose current canonical locator over HTTP (`GET /api/reading`).
+- [x] BLE GATT server (`MuseBleServer`) — advertises as "Margin", pushes page
+      text on every page turn as chunked UTF-8 notify.
+      Service UUID: `4D555345-0001-1000-8000-000000000000`.
+- [x] Companion app scaffolded (`companion/`) — Expo + react-native-ble-plx +
+      expo-speech. No Xcode needed: deploy via EAS cloud build.
+- [ ] EAS build delivered to iPhone — install dev build, verify BLE connects.
+- [ ] End-to-end proof: open book → turn page → iPhone speaks the page via TTS
+      → AirPods.
+- [ ] X4 highlights the active phrase while iPhone narrates.
+
+**Companion app:** `companion/` — see `companion/README.md` for setup.
+**BLE spec:** `shared/protocol/ble.md`.
+**HTTP locator spec:** `shared/protocol/locator.md`.
+
+**iOS app strategy:**
+- Phase 1: Expo dev build via EAS cloud (no Xcode, no App Store).
+- Production: fork CrossX (`jtvargas/crosspoint-app`, MIT) and add BLE narration
+  layer. CrossX is already on the App Store for WiFi file management.
 
 ## Phase 2 — Discuss loop
 

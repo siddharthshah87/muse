@@ -13,7 +13,7 @@ DEST="$REPO_ROOT/firmware-x4/crosspoint"
 
 # Pinned upstream refs (update these deliberately; see docs/forking.md).
 CROSSPOINT_URL="https://github.com/crosspoint-reader/crosspoint-reader.git"
-CROSSPOINT_REF="9cfdaa46a1914370730e73b7f83461387a65925e"   # feat-x4-papermono-support @ 2026-08-13 (PR #2983)
+CROSSPOINT_REF="a02ccd899afe78d52f3a4d95d6fc839626f187d9"   # feat-x4-papermono-support "Beta 22" @ 2026-08-14
 FREEINK_SDK_REF="4ff75b2baf4930392898a98392329ebec963a125"  # freeink-sdk main @ 2026-08-13
 
 if [ -d "$DEST/.git" ]; then
@@ -37,4 +37,9 @@ cp "$REPO_ROOT/firmware-x4/platformio.local.ini"  "$DEST/platformio.local.ini"
 cp "$REPO_ROOT/firmware-x4/partitions_x4pro.csv"  "$DEST/partitions_x4pro.csv"
 echo "Applied overlay -> $DEST/platformio.local.ini"
 echo "Applied overlay -> $DEST/partitions_x4pro.csv"
+
+# Copy extra_scripts (needed for build — adds missing RainMaker headers).
+mkdir -p "$DEST/scripts"
+cp "$REPO_ROOT/firmware-x4/scripts/add_rainmaker_includes.py" "$DEST/scripts/add_rainmaker_includes.py"
+echo "Applied overlay -> $DEST/scripts/add_rainmaker_includes.py"
 echo "Done. Build with: ./tools/build-firmware.sh"

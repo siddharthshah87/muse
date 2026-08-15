@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Margin",
+    "slug": "margin-companion",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "margin",
+    "platforms": ["ios"],
+    "ios": {
+      "bundleIdentifier": "com.margin.companion",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "Margin uses Bluetooth to receive your page position from the X4 Pro reader and narrate it via TTS.",
+        "UIBackgroundModes": ["bluetooth-central", "audio"]
+      }
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true,
+          "modes": ["peripheral", "central"],
+          "bluetoothAlwaysPermission": "Margin uses Bluetooth to stay connected to your X4 Pro reader."
+        }
+      ]
+    ]
+  }
+}
