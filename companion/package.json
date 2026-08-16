@@ -1,13 +1,14 @@
 {
   "name": "margin-companion",
   "version": "1.0.0",
-  "main": "expo-router/entry",
+  "main": "expo/AppEntry",
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
     "build:dev": "eas build --profile development --platform ios"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "^2.1.2",
     "expo": "~52.0.0",
     "expo-speech": "~13.0.0",
     "expo-status-bar": "~2.0.0",

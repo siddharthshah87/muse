@@ -1,0 +1,104 @@
+name: Companion iOS Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "companion/**"
+      - ".github/workflows/companion-build.yml"
+  pull_request:
+    paths:
+      - "companion/**"
+      - ".github/workflows/companion-build.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build-ios-preview:
+    runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache companion dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            companion/node_modules
+            ~/.npm
+          key: ${{ runner.os }}-companion-${{ hashFiles('companion/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-companion-
+
+      - name: Install companion dependencies
+        working-directory: companion
+        run: npm install --no-fund --no-audit
+
+      - name: Start EAS preview build
+        id: eas_build
+        working-directory: companion
+        run: |
+          BUILD_OUTPUT=$(npx eas-cli build --profile preview --platform ios --non-interactive --json)
+          printf '%s\n' "$BUILD_OUTPUT" > eas-build-output.json
+
+          node <<'NODE'
+          const fs = require('fs');
+          const raw = fs.readFileSync('eas-build-output.json', 'utf8').trim();
+          const parsed = JSON.parse(raw);
+          const build = Array.isArray(parsed)
+            ? parsed[0]
+            : Array.isArray(parsed.builds)
+              ? parsed.builds[0]
+              : parsed;
+          const buildUrl =
+            build.buildDetailsPageUrl ||
+            build.dashboardUrl ||
+            build.url ||
+            '';
+          const buildId = build.id || '';
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `build_url=${buildUrl}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `build_id=${buildId}\n`);
+          NODE
+
+      - name: Add build summary
+        run: |
+          {
+            echo "## Margin iOS preview build"
+            echo
+            echo "- Build ID: ${{ steps.eas_build.outputs.build_id || 'unknown' }}"
+            echo "- Build URL: ${{ steps.eas_build.outputs.build_url || 'not returned' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment build URL on pull request
+        if: github.event_name == 'pull_request' && steps.eas_build.outputs.build_url != ''
+        uses: actions/github-script@v7
+        env:
+          BUILD_URL: ${{ steps.eas_build.outputs.build_url }}
+          BUILD_ID: ${{ steps.eas_build.outputs.build_id }}
+        with:
+          script: |
+            const buildUrl = process.env.BUILD_URL;
+            const buildId = process.env.BUILD_ID || 'unknown';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                '📱 Margin iOS preview build started.',
+                '',
+                `- Build ID: ${buildId}`,
+                `- Build URL: ${buildUrl}`,
+              ].join('\n'),
+            });

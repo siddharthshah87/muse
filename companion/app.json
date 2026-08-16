@@ -1,27 +1,27 @@
 {
   "expo": {
     "name": "Margin",
-    "slug": "margin-companion",
+    "slug": "margin-reader",
     "version": "1.0.0",
     "orientation": "portrait",
     "scheme": "margin",
     "platforms": ["ios"],
     "ios": {
-      "bundleIdentifier": "com.margin.companion",
+      "bundleIdentifier": "com.siddharthshah87.margin",
+      "supportsTablet": false,
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "Margin uses Bluetooth to receive your page position from the X4 Pro reader and narrate it via TTS.",
-        "UIBackgroundModes": ["bluetooth-central", "audio"]
+        "NSBluetoothAlwaysUsageDescription": "Margin uses Bluetooth to connect to your e-reader and receive page text for narration.",
+        "NSBluetoothPeripheralUsageDescription": "Margin uses Bluetooth to connect to your e-reader and receive page text for narration.",
+        "UIBackgroundModes": ["bluetooth-central", "audio", "fetch"],
+        "AVAudioSessionCategory": "AVAudioSessionCategoryPlayback"
       }
     },
-    "plugins": [
-      [
-        "react-native-ble-plx",
-        {
-          "isBackgroundEnabled": true,
-          "modes": ["peripheral", "central"],
-          "bluetoothAlwaysPermission": "Margin uses Bluetooth to stay connected to your X4 Pro reader."
-        }
-      ]
-    ]
+    "plugins": ["expo-speech"],
+    "extra": {
+      "eas": {
+        "projectId": "YOUR_EAS_PROJECT_ID"
+      },
+      "easProjectIdNote": "TODO: replace YOUR_EAS_PROJECT_ID after running 'eas init' in companion/."
+    }
   }
 }
