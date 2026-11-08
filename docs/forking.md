@@ -48,20 +48,24 @@ half is the **Margin app** (forking/reusing CrossX).
 5. **Track our deltas.** Maintain a short changelog of every upstream file we
    touch and why (see below).
 
-## Recommended git approach
+## Git approach (firmware): pinned clone + tracked overlay
 
-Because this is a monorepo but upstreams are separate repos, prefer **git
-subtree** (self-contained history, simple for contributors) or vendored imports
-with a recorded upstream ref. Avoid submodules unless we need to push changes
-back frequently.
+CrossPoint is **not vendored**. `tools/setup-crosspoint.sh` clones it at a pinned
+ref into the git-ignored `firmware-x4/crosspoint/`, pins `freeink-sdk`, then runs
+`tools/apply-muse-overlay.sh`, which:
 
-```
-# Example (subtree) — fill in real URLs after the license review:
-git subtree add --prefix firmware-x4/upstream <crosspoint-url> <tag> --squash
-git subtree add --prefix ios/upstream         <crossx-url>     <tag> --squash
-```
+1. copies our build config (`platformio.local.ini`, `partitions_x4pro.csv`,
+   `scripts/`) into the clone;
+2. mirrors each Margin module in `firmware-x4/src/<module>/` to
+   `crosspoint/src/<module>/`;
+3. applies `firmware-x4/patches/*.patch` (our edits to upstream files),
+   skipping any already applied and failing loudly on conflicts.
 
-Keep Margin-authored code OUTSIDE the `upstream/` prefix so pulls stay clean.
+`tools/build-firmware.sh` re-runs the overlay before every build, so the tracked
+files always win. To change an upstream hook: edit it in `crosspoint/`, then
+regenerate its patch with `git -C firmware-x4/crosspoint diff HEAD -- <file> >
+firmware-x4/patches/<NNNN-name>.patch`. To move to a new upstream ref, bump the
+pins in `setup-crosspoint.sh`, re-clone, and fix any patch that no longer applies.
 
 ## Upstream provenance log
 
@@ -69,8 +73,8 @@ Record what we forked and every delta. Keep this table current.
 
 | Component | Upstream ref (commit/tag) | Date | Notes |
 |-----------|---------------------------|------|-------|
-| CrossPoint | [crosspoint-reader/crosspoint-reader](https://github.com/crosspoint-reader/crosspoint-reader) `feat-x4-papermono-support` @ `9cfdaa46` (MIT), PR #2983 | 2026-08-13 | Firmware base. Contains official X4 Pro `[env:x4pro]` with display/touch/frontlight support. |
-| freeink-sdk | [Free-Ink/freeink-sdk](https://github.com/Free-Ink/freeink-sdk) `main` @ `58d34b37` (submodule) | 2026-08-13 | HAL; provides `XTEINK_X4_PRO` profile. |
+| CrossPoint | [crosspoint-reader/crosspoint-reader](https://github.com/crosspoint-reader/crosspoint-reader) `feat-x4-papermono-support` @ `a02ccd89` "Beta 22" (MIT), PR #2983 | 2026-08-14 | Firmware base. Contains official X4 Pro `[env:x4pro]` with display/touch/frontlight support. Pinned in `tools/setup-crosspoint.sh`. |
+| freeink-sdk | [Free-Ink/freeink-sdk](https://github.com/Free-Ink/freeink-sdk) `main` @ `4ff75b2b` (submodule, merge of PR #36 X4 Pro USB support) | 2026-08-13 | HAL; provides `XTEINK_X4_PRO` profile. Pinned in `tools/setup-crosspoint.sh`. |
 | CrossX | [jtvargas/crosspoint-app](https://github.com/jtvargas/crosspoint-app) `main` (MIT, community) | 2026-08-13 | iOS companion base. SwiftUI/MVVM. Xcode 26/iOS 26. HTTP/WiFi only. |
 
 ## CrossX reuse map & gaps (iOS)
@@ -102,12 +106,13 @@ hotspot only** — no BLE — so `DeviceBridge` must add the BLE path itself.
 ## Known gaps for Margin
 
 - **BLE is disabled in mainline** (`lib_ignore = BLE` in `platformio.ini`).
-  Margin's control channel needs BLE — we must enable/add it in our fork
-  (`device_protocol/`). The ESP32-S3 supports BT 5 LE.
+  **RESOLVED** in our overlay: `platformio.local.ini` adds NimBLE-Arduino and a
+  controller-only BT sdkconfig; `MuseBleServer` (`device_protocol/`) uses it.
 - **No X4 Pro env in crosspoint's `platformio.ini` yet** — ~~only C3 envs~~
   **RESOLVED**: PR #2983 (`feat-x4-papermono-support`) adds the official `[env:x4pro]`.
-  We pin to that branch. Our `platformio.local.ini` adds only the partition table
-  and `-DMUSE_BUILD=1`.
+  We pin to that branch. Our `platformio.local.ini` repeats that env (PlatformIO
+  replaces duplicate sections) and adds the partition table, NimBLE and
+  `-DMUSE_BUILD=1`.
 - **Dual-boot nuance**: the device boots **app1** (OEM). A custom build flashed to
   app0 @ `0x10000` only boots if `otadata` selects app0 — keeps OEM in app1 as a
   fallback. See [hardware.md](hardware.md).
@@ -118,6 +123,10 @@ hotspot only** — no BLE — so `DeviceBridge` must add the BLE path itself.
 |-----------|------|--------|--------|---------------|
 | Muse overlay | `platformio.local.ini` (added) | New file — `[env:x4pro]` env: S3 board, X4 Pro device flags, correct partition table | CrossPoint has no x4pro env; using C3 table causes bootloops | No (product-specific) |
 | Muse overlay | `partitions_x4pro.csv` (added) | X4 Pro partition layout: app 7.875 MB × 2, app1 @ 0x7F0000 | CrossPoint's `partitions.csv` is for the C3 (6.25 MB apps, app1 @ 0x650000) — mismatch causes bootloops | No (device-specific) |
+| Muse modules | `src/device_protocol/` (added) | `MuseBleServer`, `ReadingState`, text trace ring | BLE page-text channel + locator state | No (product-specific) |
+| `0001-api-reading-endpoint.patch` | `src/network/CrossPointWebServer.{h,cpp}` | `GET /api/reading` handler | Expose canonical locator over HTTP | Maybe (generic "current position" API) |
+| `0002-reader-ble-page-hooks.patch` | `src/activities/reader/EpubReaderActivity.cpp` | After `saveProgress()`: update `ReadingState`, start BLE, notify page text | Narration sync | No |
+| `0003-serial-trace-command.patch` | `src/main.cpp` | `CMD:TRACE` serial command dumps the trace ring | Debugging BLE on device | No |
 
 ## Non-goals for the fork
 

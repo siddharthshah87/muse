@@ -2,9 +2,10 @@
 
 ## Device advertisement
 
-The X4 Pro firmware (Muse) advertises as **"Margin"** over BLE once a book is
-opened (`EpubReaderActivity::onEnter`). The device name and service UUID are
-stable across firmware updates.
+The X4 Pro firmware (Muse) advertises as **"Margin"** over BLE from the first
+time the reader saves progress in a book (`EpubReaderActivity::saveProgress()`
+calls `MuseBleServer::init()`), and keeps advertising until reboot. The device
+name and service UUID are stable across firmware updates.
 
 ## GATT service
 
@@ -30,9 +31,11 @@ byte 1  : total        uint8   total number of chunks for this page
 bytes 2…: text payload UTF-8   up to 180 bytes
 ```
 
-All chunks belonging to one page share the same `total` value. The companion
-reassembles by collecting `total` chunks, ordered by `seq`, and concatenating
-their payloads.
+All chunks belonging to one page share the same `total` value and are sent in
+order, `seq` 0 first. Chunk boundaries are raw byte offsets, so **a chunk may
+end in the middle of a UTF-8 character**: concatenate the payload bytes of all
+chunks first, then decode. Pages longer than 4096 bytes are cut at the last
+whole UTF-8 character. Pages with no text are not sent.
 
 **Example** — 350-byte page splits into 2 chunks:
 
@@ -47,8 +50,12 @@ Inter-chunk delay: 5 ms (firmware-side `delay(5)` between `notify()` calls).
 
 1. Scan for service UUID `4D555345-0001-…`.
 2. Connect and subscribe to the page-text characteristic.
-3. On each notify: buffer chunk → when `chunkBuf.size == total`, reassemble
-   and pass assembled text to `Speech.speak()`.
+3. On each notify (`companion/src/pageAssembler.ts`):
+   - `seq == 0` starts a new page and discards any partial one;
+   - any other chunk must be the next `seq` with the same `total`, otherwise
+     the partial page is discarded (a notify was dropped) — never mix pages;
+   - after chunk `total - 1`, concatenate the bytes, decode UTF-8, and pass
+     the text to `Speech.speak()`.
 4. Interrupt any in-progress speech before speaking the new page.
 5. Background mode: declare `bluetooth-central` + `audio` in `UIBackgroundModes`
    so the app keeps the BLE connection and can speak while the screen is off.
@@ -61,12 +68,19 @@ because `react-native-ble-plx` uses native modules.
 
 ```bash
 cd companion
-npm install
+npm ci
 npx eas-cli login        # free Expo account
-npx eas build --profile development --platform ios
+npx eas-cli init         # once: sets the EAS projectId in app.json
+npx eas-cli build --profile development --platform ios
 # EAS emails an install link (~15 min build in cloud, no Xcode needed)
 npx expo start           # then scan QR from the installed dev app
 ```
+
+## Not yet implemented
+
+Book metadata (title/author/page) is not sent over BLE yet; UUID
+`4D555345-0003-…` is reserved for it. Title and author are available over HTTP
+from `GET /api/reading` meanwhile.
 
 ## WiFi / HTTP endpoint (debug)
 

@@ -28,8 +28,7 @@ Windows):
 ./tools/bootstrap.sh
 ```
 
-This creates a repo-local `.venv/` and installs `esptool`. It does **not**
-install PlatformIO/pioarduino yet (that comes when we build custom firmware).
+This creates a repo-local `.venv/` and installs `esptool` and PlatformIO.
 
 ### Linux serial permissions
 
@@ -75,19 +74,30 @@ have multiple serial devices, pass one explicitly:
 .venv/Scripts/python tools/identify_device.py --port COM4        # Windows
 ```
 
-## iOS app (macOS only)
+## Build the Muse firmware
 
-The [ios/](../ios/) half requires macOS + Xcode and is expected to fork/reuse
-CrossX. It cannot be built on Windows or Linux. Setup steps will be added when we
-begin Phase 1.
+```bash
+./tools/setup-crosspoint.sh   # clone CrossPoint + pinned freeink-sdk, apply overlay
+./tools/build-firmware.sh     # re-applies the overlay, then builds env x4pro
+```
 
-## Later: PlatformIO/pioarduino for custom firmware builds
+`firmware-x4/` is the source of truth: Margin modules live in
+`firmware-x4/src/`, and our edits to upstream files are patches in
+`firmware-x4/patches/`. `tools/apply-muse-overlay.sh` copies/applies them into
+the git-ignored `firmware-x4/crosspoint/` tree; never edit Margin modules there.
+Flashing is a separate, deliberate step: `.venv/bin/python tools/flash_x4pro.py`
+(requires a verified backup — see [recovery-x4.md](recovery-x4.md)).
 
-Building a custom X4 Pro firmware (Phase 0 step "custom fork boots") uses
-**PlatformIO/pioarduino** (the CrossPoint build system), not raw ESP-IDF.
-CrossPoint already has an ESP32-S3 board pattern (`[env:sticky]`) and the
-`freeink-sdk` provides a hardware-confirmed **X4 Pro** profile
-(`-DFREEINK_DEVICE_X4PRO=1`, sample `[env:x4pro]`). That toolchain install is
-deferred until we reach it; it will be documented here and scripted in `tools/`.
-Prereqs (from CrossPoint): pioarduino (or VS Code + pioarduino plugin),
-Python 3.8+, `clang-format` 21, and `git clone --recursive` for `freeink-sdk`.
+## Companion app (no Mac needed)
+
+The Phase 1 iPhone app in [companion/](../companion/) is built in the cloud with
+EAS — see [companion/DEPLOY.md](../companion/DEPLOY.md). Locally you can
+typecheck and bundle it on Linux:
+
+```bash
+cd companion && npm ci
+npx tsc --noEmit -p .
+npx expo export --platform ios --output-dir /tmp/margin-bundle
+```
+
+The native [ios/](../ios/) app (later, forking CrossX) requires macOS + Xcode.

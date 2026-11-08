@@ -17,8 +17,9 @@ definitions, backend services, evals, tooling, and docs all live together so a
 single canonical locator/protocol contract can be shared across devices.
 
 ```
-xteink/                     # repo root (project name: "Margin")
+muse/                       # repo root (project name: "Margin")
   firmware-x4/              # ESP32-S3 X4 Pro firmware (CrossPoint-derived fork)
+    patches/                # our edits to upstream CrossPoint files
     src/
       reader_integration/   # hooks into the reader engine
       locator/              # canonical locator engine
@@ -26,6 +27,7 @@ xteink/                     # repo root (project name: "Margin")
       device_protocol/      # BLE/Wi-Fi protocol service
       annotations/          # highlight/note/selection UI + durable queue
     test_fixtures/          # EPUB + locator conformance fixtures
+  companion/                # Phase 1 iPhone app: Expo + BLE + TTS (EAS cloud build)
   ios/                      # SwiftUI companion app (requires macOS to build)
     MarginApp/
       DeviceBridge/         # BLE control + Wi-Fi bulk transfer
@@ -56,17 +58,22 @@ their future purpose. We build them out phase by phase per the roadmap.
 Any computer can be brought up to speed with the tooling in `tools/`. See
 [docs/setup.md](docs/setup.md) for the full, reproducible instructions.
 
-Quick start (Windows / PowerShell):
+Quick start (Ubuntu / macOS / Git Bash on Windows; on Windows use
+`.venv/Scripts/python` instead of `.venv/bin/python`):
 
-```powershell
-# From the repo root. Installs Python + esptool into a local virtualenv.
-./tools/bootstrap.ps1
+```bash
+# From the repo root. Creates .venv/ with esptool + PlatformIO.
+./tools/bootstrap.sh
 
 # Identify the connected X4 Pro (read-only, non-destructive).
-./tools/identify-device.ps1
+.venv/bin/python tools/identify_device.py
 
 # Back up the entire factory flash BEFORE modifying anything.
-./tools/backup-flash.ps1
+.venv/bin/python tools/backup_flash.py
+
+# Fetch CrossPoint, apply our overlay, and build Muse.
+./tools/setup-crosspoint.sh
+./tools/build-firmware.sh
 ```
 
 ## Safety first
@@ -79,5 +86,6 @@ a verified full-flash backup exists.** The recovery procedure is documented in
 
 - **Firmware** (esptool now; **PlatformIO/pioarduino** for custom CrossPoint
   builds) works on Windows, macOS, or Linux.
-- **iOS app** requires **macOS + Xcode**. It cannot be built on this Windows
-  machine; that half of the monorepo is developed on a Mac.
+- **Companion app** (`companion/`) needs no Mac: it is built in the cloud with
+  EAS. See [companion/DEPLOY.md](companion/DEPLOY.md).
+- **Native iOS app** (`ios/`, later) requires **macOS + Xcode**.
