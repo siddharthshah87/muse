@@ -34,7 +34,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: companion/package-lock.json
 
@@ -84,7 +84,7 @@ jobs:
         if: steps.eas_config.outputs.enabled == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: companion/package-lock.json
 

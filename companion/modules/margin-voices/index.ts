@@ -1,4 +1,4 @@
-import { requireOptionalNativeModule } from 'expo-modules-core';
+import { requireOptionalNativeModule } from 'expo';
 import * as Speech from 'expo-speech';
 
 export type VoiceQuality = 'premium' | 'enhanced' | 'default';

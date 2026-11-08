@@ -35,6 +35,13 @@
             "deploymentTarget": "17.0"
           }
         }
+      ],
+      [
+        "react-native-audio-api",
+        {
+          "iosBackgroundMode": true,
+          "disableFFmpeg": true
+        }
       ]
     ]
   }

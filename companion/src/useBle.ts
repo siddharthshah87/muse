@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BleError, BleManager, Characteristic, Device } from 'react-native-ble-plx';
-import * as Speech from 'expo-speech';
 import { PageAssembler, base64ToBytes } from './pageAssembler';
-import { PageBreakJoiner, splitForSpeech } from './narration';
+import type { Narrator, Prepared } from './narrators';
 
 export const MUSE_SERVICE_UUID = '4D555345-0001-1000-8000-000000000000';
 export const PAGE_TEXT_CHAR_UUID = '4D555345-0002-1000-8000-000000000000';
 export const CONTROL_CHAR_UUID = '4D555345-0004-1000-8000-000000000000';
 const NEXT_PAGE_COMMAND_B64 = 'AQ=='; // 0x01, see shared/protocol/ble.md
+const PEEK_NEXT_COMMAND_B64 = 'Ag=='; // 0x02: send the next page's text without turning
+const PREVIEW_FLAG = 0x80; // set on seq for next-page previews
 const NEXT_PAGE_WAIT_MS = 15000;
+const PEEK_ANSWER_MS = 2500; // no preview by then: firmware without PEEK_NEXT
 
 /** self: no speech · page: speak each page, then wait · continuous: speak, turn the page, repeat */
 export type ReadingMode = 'self' | 'page' | 'continuous';
@@ -22,6 +24,9 @@ export type BleStatus =
   | 'error';
 
 export interface UseMuseBleOptions {
+  /** Speaks pages: iOS system voices or on-device Kokoro (src/narrators.ts). */
+  narrator: Narrator;
+  /** Voice for the current narrator (system voice identifier or Kokoro voice key). */
   voice?: string | null;
   rate: number;
   mode: ReadingMode;
@@ -45,11 +50,14 @@ export interface UseMuseBleResult {
   togglePause: () => void;
 }
 
-function clampRate(rate: number) {
-  return Math.max(0.5, Math.min(2, rate));
-}
-
-export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMuseBleOptions): UseMuseBleResult {
+export function useMuseBle({
+  narrator,
+  voice,
+  rate,
+  mode,
+  autoConnect,
+  onPageText,
+}: UseMuseBleOptions): UseMuseBleResult {
   const managerRef = useRef<BleManager | null>(null);
   if (!managerRef.current) {
     managerRef.current = new BleManager();
@@ -57,20 +65,27 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
   const manager = managerRef.current;
   const deviceRef = useRef<Device | null>(null);
   const assemblerRef = useRef(new PageAssembler());
-  const joinerRef = useRef(new PageBreakJoiner());
+  const previewAssemblerRef = useRef(new PageAssembler());
+  // Gapless continuous reading (shared/protocol/ble.md): the next page's text, received as a
+  // preview while the current page is read; and the text we started at the turn, which the
+  // real page that follows only confirms.
+  const nextPreviewRef = useRef<Prepared | null>(null);
+  const currentRef = useRef<Prepared | null>(null); // the page being heard
+  const confirmRef = useRef<string | null>(null);
+  const peekOkRef = useRef<boolean | null>(null);
+  const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const monitorSubscriptions = useRef<Array<{ remove: () => void }>>([]);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef(false);
   const statusRef = useRef<BleStatus>('idle');
-  const speakToken = useRef(0); // bumps on every stop/new page; stale speech callbacks are ignored
   const awaitingNextRef = useRef(false);
   const supportsContinuousRef = useRef(false);
   const lastPageRef = useRef<string | null>(null);
 
   // Latest settings, read by BLE and speech callbacks that outlive a render.
-  const settingsRef = useRef({ voice, rate, mode, onPageText });
-  settingsRef.current = { voice, rate, mode, onPageText };
+  const settingsRef = useRef({ narrator, voice, rate, mode, onPageText });
+  settingsRef.current = { narrator, voice, rate, mode, onPageText };
   const pausedRef = useRef(false);
 
   const [status, setStatus] = useState<BleStatus>('idle');
@@ -102,66 +117,66 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     setIsTurningPage(false);
   }, []);
 
+  const resetPreviews = useCallback(() => {
+    if (peekTimer.current) {
+      clearTimeout(peekTimer.current);
+      peekTimer.current = null;
+    }
+    if (nextPreviewRef.current) {
+      settingsRef.current.narrator.discard(nextPreviewRef.current);
+    }
+    nextPreviewRef.current = null;
+    confirmRef.current = null;
+    previewAssemblerRef.current.reset();
+  }, []);
+
   const clearSubscriptions = useCallback(() => {
     monitorSubscriptions.current.forEach((subscription) => subscription.remove());
     monitorSubscriptions.current = [];
   }, []);
 
   const stopSpeech = useCallback(() => {
-    speakToken.current += 1;
-    Speech.stop();
+    settingsRef.current.narrator.stop();
+    currentRef.current = null;
     setIsSpeaking(false);
   }, []);
 
-  // Speaks text as a queue of sentence-sized utterances; onDone runs only if it was read to the end.
-  const speak = useCallback(
-    (text: string, onDone?: () => void) => {
-      stopSpeech();
-      if (settingsRef.current.mode === 'self' || pausedRef.current) {
-        return;
-      }
-      const pieces = splitForSpeech(text);
-      if (!pieces.length) {
-        onDone?.();
-        return;
-      }
-      const token = speakToken.current;
-      const { voice: voiceId, rate: speechRate } = settingsRef.current;
-      setAudioDisconnected(false);
-      setIsSpeaking(true);
+  const prepare = useCallback((text: string): Prepared => {
+    const { narrator: engine, voice: voiceId, rate: speechRate } = settingsRef.current;
+    return engine.prepare(text, { voice: voiceId ?? null, rate: speechRate });
+  }, []);
 
-      const interrupted = () => {
-        if (token !== speakToken.current) {
-          return; // we stopped it ourselves
-        }
-        speakToken.current += 1;
+  // Plays a page (interrupting whatever is playing); onDone runs only if it was read to the end.
+  const play = useCallback((prepared: Prepared, onDone?: () => void) => {
+    const engine = settingsRef.current.narrator;
+    if (settingsRef.current.mode === 'self' || pausedRef.current) {
+      stopSpeech();
+      engine.discard(prepared);
+      return;
+    }
+    if (currentRef.current && currentRef.current !== prepared) {
+      engine.discard(currentRef.current); // stop synthesizing a page nobody will hear
+    }
+    currentRef.current = prepared;
+    setAudioDisconnected(false);
+    setIsSpeaking(true);
+    engine.play(prepared, {
+      onDone: () => {
+        setIsSpeaking(false);
+        onDone?.();
+      },
+      onInterrupted: () => {
         setIsSpeaking(false);
         if (statusRef.current === 'connected') {
           setAudioDisconnected(true);
         }
-      };
+      },
+    });
+  }, [stopSpeech]);
 
-      pieces.forEach((piece, index) => {
-        const last = index === pieces.length - 1;
-        Speech.speak(piece, {
-          language: 'en-US',
-          rate: clampRate(speechRate),
-          voice: voiceId ?? undefined,
-          onDone: last
-            ? () => {
-                if (token !== speakToken.current) {
-                  return;
-                }
-                setIsSpeaking(false);
-                onDone?.();
-              }
-            : undefined,
-          onStopped: interrupted,
-          onError: interrupted,
-        });
-      });
-    },
-    [stopSpeech],
+  const speak = useCallback(
+    (text: string, onDone?: () => void) => play(prepare(text), onDone),
+    [play, prepare],
   );
 
   const requestNextPage = useCallback(async () => {
@@ -175,14 +190,11 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     awaitingNextRef.current = true;
     setIsTurningPage(true);
     waitTimer.current = setTimeout(() => {
-      // No page came (end of book, or the X4 is busy): finish any held sentence and stop.
+      // No page came: end of book, or the X4 is busy.
       waitTimer.current = null;
       awaitingNextRef.current = false;
+      confirmRef.current = null;
       setIsTurningPage(false);
-      const carry = joinerRef.current.takeCarry();
-      if (carry) {
-        speak(carry);
-      }
     }, NEXT_PAGE_WAIT_MS);
     try {
       await device.writeCharacteristicWithoutResponseForService(
@@ -193,25 +205,60 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     } catch {
       clearWait();
     }
-  }, [clearWait, speak]);
+  }, [clearWait]);
 
-  const afterPage = useCallback(() => {
-    if (settingsRef.current.mode === 'continuous') {
-      void requestNextPage();
+  const requestPeek = useCallback(async () => {
+    const device = deviceRef.current;
+    if (
+      settingsRef.current.mode !== 'continuous' ||
+      peekOkRef.current === false ||
+      !device ||
+      !supportsContinuousRef.current
+    ) {
+      return;
     }
-  }, [requestNextPage]);
+    if (peekOkRef.current === null && !peekTimer.current) {
+      peekTimer.current = setTimeout(() => {
+        peekTimer.current = null;
+        if (peekOkRef.current === null) {
+          peekOkRef.current = false; // older firmware: turn first, then read
+        }
+      }, PEEK_ANSWER_MS);
+    }
+    try {
+      await device.writeCharacteristicWithoutResponseForService(
+        MUSE_SERVICE_UUID,
+        CONTROL_CHAR_UUID,
+        PEEK_NEXT_COMMAND_B64,
+      );
+    } catch {
+      // the turn-then-read path still works
+    }
+  }, []);
+
+  // A page has been read to the end: turn the X4 and, if the next page was previewed,
+  // start reading it in the same moment.
+  const afterPageRef = useRef<() => void>(() => undefined);
+  const afterPage = useCallback(() => afterPageRef.current(), []);
+  afterPageRef.current = () => {
+    if (settingsRef.current.mode !== 'continuous' || pausedRef.current) {
+      return;
+    }
+    const next = nextPreviewRef.current;
+    nextPreviewRef.current = null;
+    if (next) {
+      confirmRef.current = next.text;
+      lastPageRef.current = next.text;
+      setLastPageText(next.text);
+      settingsRef.current.onPageText?.(next.text);
+      play(next, afterPage); // already prepared while the last page was read
+    }
+    void requestNextPage();
+  };
 
   const handlePage = useCallback(
     (text: string) => {
       const { mode: currentMode } = settingsRef.current;
-      // Pages without text (images) arrive empty (shared/protocol/ble.md): skip ahead in continuous mode.
-      if (!text.trim()) {
-        if (currentMode === 'continuous' && !pausedRef.current) {
-          setTimeout(() => void requestNextPage(), 400);
-        }
-        return;
-      }
-      const continuesPrevious = awaitingNextRef.current;
       if (waitTimer.current) {
         clearTimeout(waitTimer.current);
         waitTimer.current = null;
@@ -219,33 +266,77 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
       awaitingNextRef.current = false;
       setIsTurningPage(false);
 
+      // The page we already started reading at the turn: nothing to do but look ahead again.
+      if (confirmRef.current !== null && text === confirmRef.current) {
+        confirmRef.current = null;
+        void requestPeek();
+        return;
+      }
+      confirmRef.current = null;
+      if (nextPreviewRef.current) {
+        settingsRef.current.narrator.discard(nextPreviewRef.current); // the reader moved: preview is stale
+        nextPreviewRef.current = null;
+      }
+
+      // Pages without text (images) arrive empty (shared/protocol/ble.md): skip ahead in continuous mode.
+      if (!text.trim()) {
+        if (currentMode === 'continuous' && !pausedRef.current) {
+          setTimeout(() => void requestNextPage(), 400);
+        }
+        return;
+      }
+
       lastPageRef.current = text;
       setLastPageText(text);
       setAudioDisconnected(false);
       settingsRef.current.onPageText?.(text);
 
-      if (currentMode === 'continuous') {
-        speak(joinerRef.current.next(text, continuesPrevious), afterPage);
-      } else {
-        joinerRef.current.reset();
-        speak(text);
-      }
+      // Pages are read to the end before the X4 turns, so it never shows a page ahead of the voice.
+      speak(text, currentMode === 'continuous' ? afterPage : undefined);
+      void requestPeek();
     },
-    [afterPage, requestNextPage, speak],
+    [afterPage, requestNextPage, requestPeek, speak],
   );
+
+  const handlePreview = useCallback((text: string) => {
+    if (peekTimer.current) {
+      clearTimeout(peekTimer.current);
+      peekTimer.current = null;
+    }
+    peekOkRef.current = true;
+    if (nextPreviewRef.current) {
+      settingsRef.current.narrator.discard(nextPreviewRef.current);
+    }
+    // Prepare the next page now (Kokoro synthesizes it after the page being heard). Empty preview:
+    // next page not laid out yet, or no text — turn first, then read.
+    nextPreviewRef.current = text.trim() ? prepare(text) : null;
+  }, [prepare]);
 
   const handlePageRef = useRef(handlePage);
   handlePageRef.current = handlePage;
 
-  const handleChunk = useCallback((characteristic: Characteristic) => {
-    if (!characteristic.value) {
-      return;
-    }
-    const assembled = assemblerRef.current.push(base64ToBytes(characteristic.value));
-    if (assembled !== null) {
-      handlePageRef.current(assembled);
-    }
-  }, []);
+  const handleChunk = useCallback(
+    (characteristic: Characteristic) => {
+      if (!characteristic.value) {
+        return;
+      }
+      const bytes = base64ToBytes(characteristic.value);
+      if (bytes.length && bytes[0] & PREVIEW_FLAG) {
+        const unflagged = bytes.slice();
+        unflagged[0] &= ~PREVIEW_FLAG;
+        const preview = previewAssemblerRef.current.push(unflagged);
+        if (preview !== null) {
+          handlePreview(preview);
+        }
+        return;
+      }
+      const assembled = assemblerRef.current.push(bytes);
+      if (assembled !== null) {
+        handlePageRef.current(assembled);
+      }
+    },
+    [handlePreview],
+  );
 
   const connect = useCallback(() => {
     if (statusRef.current === 'scanning' || statusRef.current === 'connecting' || statusRef.current === 'connected') {
@@ -255,7 +346,8 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     manualDisconnectRef.current = false;
     clearReconnectTimer();
     assemblerRef.current.reset();
-    joinerRef.current.reset();
+    resetPreviews();
+    peekOkRef.current = null;
     clearSubscriptions();
     manager.stopDeviceScan();
     setStatus('scanning');
@@ -311,6 +403,7 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
           connected.onDisconnected(() => {
             clearSubscriptions();
             clearWait();
+            resetPreviews();
             deviceRef.current = null;
             setStatus(manualDisconnectRef.current ? 'idle' : 'disconnected');
           });
@@ -321,7 +414,7 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
         }
       },
     );
-  }, [clearReconnectTimer, clearSubscriptions, clearWait, handleChunk, manager]);
+  }, [clearReconnectTimer, clearSubscriptions, clearWait, handleChunk, manager, resetPreviews]);
 
   const disconnect = useCallback(() => {
     manualDisconnectRef.current = true;
@@ -330,7 +423,7 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     manager.stopDeviceScan();
     clearSubscriptions();
     stopSpeech();
-    joinerRef.current.reset();
+    resetPreviews();
     setAudioDisconnected(false);
     const currentDevice = deviceRef.current;
     if (currentDevice) {
@@ -338,7 +431,7 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     }
     deviceRef.current = null;
     setStatus('idle');
-  }, [clearReconnectTimer, clearSubscriptions, clearWait, manager, stopSpeech]);
+  }, [clearReconnectTimer, clearSubscriptions, clearWait, manager, resetPreviews, stopSpeech]);
 
   const replayLastPage = useCallback(() => {
     const text = lastPageRef.current;
@@ -347,9 +440,10 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     }
     pausedRef.current = false;
     setIsPaused(false);
-    joinerRef.current.reset();
+    confirmRef.current = null;
     speak(text, afterPage);
-  }, [afterPage, speak]);
+    void requestPeek();
+  }, [afterPage, requestPeek, speak]);
 
   const togglePause = useCallback(() => {
     const next = !pausedRef.current;
@@ -359,10 +453,22 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
     if (next) {
       stopSpeech();
     } else if (lastPageRef.current) {
-      joinerRef.current.reset();
+      confirmRef.current = null;
       speak(lastPageRef.current, afterPage);
+      void requestPeek();
     }
-  }, [afterPage, clearWait, speak, stopSpeech]);
+  }, [afterPage, clearWait, requestPeek, speak, stopSpeech]);
+
+  const previousNarratorRef = useRef(narrator);
+  useEffect(() => {
+    if (previousNarratorRef.current !== narrator) {
+      previousNarratorRef.current.stop();
+      previousNarratorRef.current = narrator;
+      resetPreviews();
+      currentRef.current = null;
+      setIsSpeaking(false);
+    }
+  }, [narrator, resetPreviews]);
 
   // Mode changes: silence for "I'll read"; switching to continuous between pages reads the
   // current page and carries on (mid-page, the page's own end-of-speech turns it).
@@ -372,16 +478,19 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
       return;
     }
     previousModeRef.current = mode;
-    joinerRef.current.reset();
+    resetPreviews();
     clearWait();
     pausedRef.current = false;
     setIsPaused(false);
     if (mode === 'self') {
       stopSpeech();
-    } else if (mode === 'continuous' && !isSpeaking && lastPageRef.current && statusRef.current === 'connected') {
-      speak(lastPageRef.current, afterPage);
+    } else if (mode === 'continuous' && statusRef.current === 'connected') {
+      if (!isSpeaking && lastPageRef.current) {
+        speak(lastPageRef.current, afterPage);
+      }
+      void requestPeek();
     }
-  }, [afterPage, clearWait, isSpeaking, mode, speak, stopSpeech]);
+  }, [afterPage, clearWait, isSpeaking, mode, requestPeek, resetPreviews, speak, stopSpeech]);
 
   useEffect(() => {
     if (!autoConnect || manualDisconnectRef.current) {
@@ -407,10 +516,12 @@ export function useMuseBle({ voice, rate, mode, autoConnect, onPageText }: UseMu
       if (waitTimer.current) {
         clearTimeout(waitTimer.current);
       }
+      if (peekTimer.current) {
+        clearTimeout(peekTimer.current);
+      }
       manager.stopDeviceScan();
       clearSubscriptions();
-      speakToken.current += 1;
-      Speech.stop();
+      settingsRef.current.narrator.stop();
       manager.destroy();
     },
     [clearReconnectTimer, clearSubscriptions, manager],

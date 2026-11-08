@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   AppState,
@@ -23,6 +23,8 @@ import {
   getVoices,
   requestPersonalVoice,
 } from './modules/margin-voices';
+import { KokoroLoader, KokoroState } from './src/KokoroLoader';
+import { KOKORO_VOICES, KokoroNarrator, SystemNarrator } from './src/narrators';
 import { ReadingMode, useMuseBle } from './src/useBle';
 import { useSettings } from './src/useSettings';
 import { WaveformBar } from './src/WaveformBar';
@@ -218,7 +220,8 @@ function CalmDot() {
 }
 
 export default function App() {
-  const { settings, isHydrated, setAutoConnect, setRate, setVoice, setMode } = useSettings();
+  const { settings, isHydrated, setAutoConnect, setRate, setVoice, setMode, setEngine, setKokoroVoice } =
+    useSettings();
   const [screen, setScreen] = useState<ScreenState>('pairing');
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [voices, setVoices] = useState<MarginVoice[]>([]);
@@ -277,6 +280,27 @@ export default function App() {
     }
   };
 
+  // Narration engine: iOS voices, or Kokoro once its model is downloaded and loaded
+  // (until then the iOS voice keeps reading).
+  const systemNarrator = useMemo(() => new SystemNarrator(), []);
+  const [kokoro, setKokoro] = useState<KokoroState | null>(null);
+  const onKokoroState = useCallback((state: KokoroState) => setKokoro(state), []);
+  useEffect(() => {
+    if (settings.engine !== 'kokoro') {
+      setKokoro(null);
+    }
+  }, [settings.engine]);
+  const kokoroNarrator = useMemo(
+    () =>
+      kokoro?.isReady && kokoro.synthesize && kokoro.synthesizeStop
+        ? new KokoroNarrator(kokoro.synthesize, kokoro.synthesizeStop)
+        : null,
+    [kokoro?.isReady, kokoro?.synthesize, kokoro?.synthesizeStop],
+  );
+  const usingKokoro = settings.engine === 'kokoro' && kokoroNarrator !== null;
+  const narrator = usingKokoro ? kokoroNarrator : systemNarrator;
+  const kokoroVoiceLabel = KOKORO_VOICES.find((v) => v.key === settings.kokoroVoice)?.label ?? settings.kokoroVoice;
+
   const {
     status,
     deviceName,
@@ -291,7 +315,8 @@ export default function App() {
     replayLastPage,
     togglePause,
   } = useMuseBle({
-    voice: settings.voice,
+    narrator,
+    voice: usingKokoro ? settings.kokoroVoice : settings.voice,
     rate: settings.rate,
     mode: settings.mode,
     autoConnect: isHydrated && settings.autoConnect,
@@ -324,7 +349,8 @@ export default function App() {
   const activeTitle = lastPageText ? READING_TITLE : DEFAULT_BOOK_TITLE;
   const activeAuthor = DEFAULT_BOOK_AUTHOR;
   const pageText = lastPageText?.trim() || 'Your latest passage will appear here as soon as the reader turns a page.';
-  const voiceName = useMemo(() => formatVoiceName(settings.voice, voices), [settings.voice, voices]);
+  const systemVoiceName = useMemo(() => formatVoiceName(settings.voice, voices), [settings.voice, voices]);
+  const voiceName = usingKokoro ? `Kokoro · ${kokoroVoiceLabel}` : systemVoiceName;
   const silent = settings.mode === 'self';
   const showWaveform = !silent && !isPaused && !audioDisconnected && isSpeaking;
   const modeHint =
@@ -511,6 +537,7 @@ export default function App() {
 
   return (
     <View style={styles.root}>
+      {settings.engine === 'kokoro' ? <KokoroLoader onChange={onKokoroState} /> : null}
       {screen === 'reading' ? renderReading() : screen === 'reconnecting' ? renderReconnecting() : renderPairing()}
 
       <Modal animationType="slide" transparent visible={settingsVisible} onRequestClose={() => setSettingsVisible(false)}>
@@ -526,10 +553,67 @@ export default function App() {
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={styles.settingGroup}>
                 <Text style={styles.settingLabel}>Voice</Text>
-                <Text style={styles.settingHint}>
-                  For the most natural voices, download a Premium voice in iOS Settings › Accessibility › Spoken
-                  Content › Voices › English. It appears here when you come back.
-                </Text>
+                {(
+                  [
+                    { engine: 'system', name: 'iPhone voices', hint: 'Built in. Premium voices and your Personal Voice.' },
+                    {
+                      engine: 'kokoro',
+                      name: 'Neural voice (Kokoro)',
+                      hint: 'Runs on this iPhone, nothing is sent anywhere. One-time ~330 MB download.',
+                    },
+                  ] as const
+                ).map((option) => {
+                  const selected = settings.engine === option.engine;
+                  return (
+                    <Pressable
+                      key={option.engine}
+                      style={[styles.voiceOption, selected && styles.voiceOptionSelected]}
+                      onPress={() => setEngine(option.engine)}
+                    >
+                      <View style={styles.optionText}>
+                        <Text style={styles.voiceName}>{option.name}</Text>
+                        <Text style={styles.voiceLocale}>{option.hint}</Text>
+                      </View>
+                      {selected ? <Text style={styles.voiceSelected}>Selected</Text> : null}
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {settings.engine === 'kokoro' ? (
+                <View style={styles.settingGroup}>
+                  <Text style={styles.settingLabel}>Kokoro voice</Text>
+                  <Text style={styles.settingHint}>
+                    {kokoro?.error
+                      ? `Could not load the voice: ${kokoro.error}. The iPhone voice is reading meanwhile.`
+                      : usingKokoro
+                        ? 'Ready.'
+                        : `Downloading the voice… ${Math.round(kokoro?.progress ?? 0)}%. The iPhone voice reads until it is ready.`}
+                  </Text>
+                  {KOKORO_VOICES.map((voice) => {
+                    const selected = settings.kokoroVoice === voice.key;
+                    return (
+                      <Pressable
+                        key={voice.key}
+                        style={[styles.voiceOption, selected && styles.voiceOptionSelected]}
+                        onPress={() => setKokoroVoice(voice.key)}
+                      >
+                        <View>
+                          <Text style={styles.voiceName}>{voice.label}</Text>
+                          <Text style={styles.voiceLocale}>{voice.gender === 'female' ? 'Female' : 'Male'} · American English</Text>
+                        </View>
+                        {selected ? <Text style={styles.voiceSelected}>Selected</Text> : null}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : (
+                <View style={styles.settingGroup}>
+                  <Text style={styles.settingLabel}>iPhone voice</Text>
+                  <Text style={styles.settingHint}>
+                    For the most natural voices, download a Premium voice in iOS Settings › Accessibility › Spoken
+                    Content › Voices › English. It appears here when you come back.
+                  </Text>
                 {personalVoiceStatus === 'notDetermined' ? (
                   <Pressable style={styles.secondaryButton} onPress={handlePersonalVoice}>
                     <Text style={styles.secondaryButtonText}>Use my Personal Voice</Text>
@@ -572,7 +656,8 @@ export default function App() {
                 ) : (
                   <Text style={styles.emptyText}>Voices will appear here when iOS shares them with the app.</Text>
                 )}
-              </View>
+                </View>
+              )}
 
               <View style={styles.settingGroup}>
                 <Text style={styles.settingLabel}>Narration speed</Text>
@@ -960,6 +1045,9 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 14,
     marginTop: 4,
+  },
+  optionText: {
+    flex: 1,
   },
   voiceOption: {
     flexDirection: 'row',

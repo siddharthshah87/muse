@@ -8,27 +8,31 @@
       "distribution": "internal",
       "ios": {
         "simulator": false
-      }
+      },
+      "node": "22.16.0"
     },
     "simulator": {
       "developmentClient": true,
       "distribution": "internal",
       "ios": {
         "simulator": true
-      }
+      },
+      "node": "22.16.0"
     },
     "preview": {
       "distribution": "internal",
       "ios": {
         "buildConfiguration": "Release"
       },
-      "channel": "preview"
+      "channel": "preview",
+      "node": "22.16.0"
     },
     "production": {
       "ios": {
         "buildConfiguration": "Release"
       },
-      "channel": "production"
+      "channel": "production",
+      "node": "22.16.0"
     }
   },
   "submit": {

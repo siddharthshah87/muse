@@ -9,12 +9,17 @@ AI narration companion for the X4 Pro e-reader.
 3. Speaks the page aloud via iOS TTS → AirPods / headphones, in one of three modes:
    - **I'll read**: silent; pages still arrive
    - **Read to me**: reads each page, then waits for you to turn it
-   - **Continuous**: reads the page, turns it on the X4, and keeps going (needs
-     X4 firmware with the control characteristic; a sentence that runs over a
-     page break is finished with the next page)
+   - **Continuous**: reads the page to the end, turns it on the X4, and keeps
+     going (needs X4 firmware with the control characteristic). With firmware
+     that answers `PEEK_NEXT`, the next page's text arrives while the current
+     one is read, so the turn and the next page start together.
 4. Keeps narrating with the screen locked (spoken-audio session + BLE background mode)
 5. Offers Premium/Enhanced iOS voices and your Personal Voice, hides robotic novelty voices
-6. Remembers mode, voice, speed, and auto-connect preferences between launches
+6. Optional on-device neural voice (**Kokoro**, via `react-native-executorch` on the CPU/XNNPACK
+   backend, played through `react-native-audio-api`). Settings › Voice › Neural voice starts a
+   one-time ~330 MB model download; the iPhone voice reads until it is ready. Nothing leaves
+   the phone (executorch telemetry is turned off).
+7. Remembers mode, voice, speed, and auto-connect preferences between launches
 
 ## Prerequisites
 
@@ -76,7 +81,17 @@ manual run) once `EXPO_TOKEN` is set and `eas init` has filled in the projectId.
 Voice authorization (iOS 17+), and the playback audio session. Speaking itself
 still goes through `expo-speech`. In a build without the module the app falls
 back to `expo-speech`'s voice list. Pure narration logic (sentence splitting,
-page-break joining) is in `src/narration.ts`.
+hyphen rejoining) is in `src/narration.ts`.
+
+## Dependency notes
+
+- `react-native-worklets` is pinned to 0.12.x (executorch needs ≥0.10, React Native 0.83 caps it
+  below 0.13) instead of SDK 55's 0.7.4, so it is listed in `expo.install.exclude`.
+  `babel-preset-expo` adds its Babel plugin automatically; no `babel.config.js` is needed.
+- `package.json` › `react-native-executorch` limits the native libraries executorch downloads at
+  install time to text-to-speech on XNNPACK.
+- `react-native-audio-api` is pinned to 0.13.x; its Expo plugin adds the `audio` background mode
+  and disables FFmpeg (only raw PCM is played).
 
 ## BLE protocol
 
