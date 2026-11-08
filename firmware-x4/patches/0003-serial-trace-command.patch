@@ -1,0 +1,21 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index 6dd819d8..b4ced574 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -39,6 +39,7 @@
+ #include "images/LoadingIcon.h"
+ #include "util/ButtonNavigator.h"
+ #include "util/ScreenshotUtil.h"
++#include "device_protocol/muse_trace_backend.h"  // Margin/Muse
+ 
+ GfxRenderer renderer(display);
+ MappedInputManager mappedInputManager(gpio, renderer);
+@@ -612,6 +613,8 @@ void loop() {
+         uint8_t* buf = display.getFrameBuffer();
+         logSerial.write(buf, bufferSize);
+         logSerial.printf("SCREENSHOT_END\n");
++      } else if (cmd == "TRACE") {  // Margin/Muse: dump the BLE trace ring
++        muse_trace_flush([](const char* l) { logSerial.println(l); });
+       } else {
+         handled = false;
+       }

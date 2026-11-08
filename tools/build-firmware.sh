@@ -40,6 +40,9 @@ done
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
+# Sync firmware-x4/ (modules, patches, config) into the CrossPoint tree first.
+"$REPO_ROOT/tools/apply-muse-overlay.sh"
+
 echo "== Building firmware (env: $ENV_NAME) =="
 cd "$CROSSPOINT_DIR"
 "$VENV_PY" -m platformio run -e "$ENV_NAME" "${PIO_ARGS[@]}"

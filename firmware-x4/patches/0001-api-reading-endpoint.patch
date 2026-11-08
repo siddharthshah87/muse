@@ -1,0 +1,56 @@
+diff --git a/src/network/CrossPointWebServer.cpp b/src/network/CrossPointWebServer.cpp
+index 1f0f44d7..86c17bee 100644
+--- a/src/network/CrossPointWebServer.cpp
++++ b/src/network/CrossPointWebServer.cpp
+@@ -1,4 +1,5 @@
+ #include "CrossPointWebServer.h"
++#include "device_protocol/ReadingState.h"  // Margin/Muse
+ 
+ #include <ArduinoJson.h>
+ #include <BoardConfig.h>
+@@ -145,6 +146,7 @@ void CrossPointWebServer::begin() {
+   server->on("/js/jszip.min.js", HTTP_GET, [this] { handleJszip(); });
+ 
+   server->on("/api/status", HTTP_GET, [this] { handleStatus(); });
++  server->on("/api/reading", HTTP_GET, [this] { handleReading(); });  // Margin/Muse
+   server->on("/api/files", HTTP_GET, [this] { handleFileListData(); });
+   server->on("/download", HTTP_GET, [this] { handleDownload(); });
+ 
+@@ -428,6 +430,25 @@ void CrossPointWebServer::handleStatus() const {
+   server->send(200, "application/json", response);
+ }
+ 
++// Margin/Muse: expose current reading position for narration sync.
++void CrossPointWebServer::handleReading() const {
++  const auto snap = ReadingState::get();
++  JsonDocument doc;
++  doc["active"] = snap.active;
++  if (snap.active) {
++    doc["book"]        = snap.bookPath;
++    doc["title"]       = snap.title;
++    doc["author"]      = snap.author;
++    doc["spine_index"] = snap.spineIndex;
++    doc["char_offset"] = snap.charOffset;
++    doc["progress"]    = snap.progress;
++    doc["updated_ms"]  = snap.updatedMs;
++  }
++  String response;
++  serializeJson(doc, response);
++  server->send(200, "application/json", response);
++}
++
+ void CrossPointWebServer::scanFiles(const char* path, const std::function<void(FileInfo)>& callback) const {
+   HalFile root = Storage.open(path);
+   if (!root) {
+diff --git a/src/network/CrossPointWebServer.h b/src/network/CrossPointWebServer.h
+index fc1aaf6e..ce2c0e8a 100644
+--- a/src/network/CrossPointWebServer.h
++++ b/src/network/CrossPointWebServer.h
+@@ -90,6 +90,7 @@ class CrossPointWebServer {
+ 
+   // Request handlers
+   void handleRoot() const;
++  void handleReading() const;  // Margin/Muse: GET /api/reading
+   void handleJszip() const;
+   void handleNotFound() const;
+   void handleStatus() const;

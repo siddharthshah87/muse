@@ -2,8 +2,8 @@
 # Reconstruct the CrossPoint upstream working tree for Muse (the X4 Pro firmware).
 #
 # The CrossPoint clone (~60 MB) is NOT vendored into this repo. This script
-# recreates it deterministically, then applies our tracked overlay so the build
-# is reproducible on any machine. Cross-platform (Ubuntu / macOS / Git Bash).
+# recreates it deterministically, then applies our tracked overlay
+# (tools/apply-muse-overlay.sh) so the build is reproducible on any machine. Cross-platform (Ubuntu / macOS / Git Bash).
 #
 # Usage:  ./tools/setup-crosspoint.sh
 set -euo pipefail
@@ -31,15 +31,6 @@ git -C "$DEST/freeink-sdk" fetch --depth 50 origin main
 git -C "$DEST/freeink-sdk" checkout "$FREEINK_SDK_REF"
 git -C "$DEST/freeink-sdk" submodule update --init --recursive
 
-# Apply our tracked overlay (adds the x4pro build env + correct X4 Pro partition table).
-# Both files must land in the crosspoint root so PlatformIO can find them.
-cp "$REPO_ROOT/firmware-x4/platformio.local.ini"  "$DEST/platformio.local.ini"
-cp "$REPO_ROOT/firmware-x4/partitions_x4pro.csv"  "$DEST/partitions_x4pro.csv"
-echo "Applied overlay -> $DEST/platformio.local.ini"
-echo "Applied overlay -> $DEST/partitions_x4pro.csv"
-
-# Copy extra_scripts (needed for build — adds missing RainMaker headers).
-mkdir -p "$DEST/scripts"
-cp "$REPO_ROOT/firmware-x4/scripts/add_rainmaker_includes.py" "$DEST/scripts/add_rainmaker_includes.py"
-echo "Applied overlay -> $DEST/scripts/add_rainmaker_includes.py"
+# Apply our tracked overlay (build config, Margin modules, upstream patches).
+"$REPO_ROOT/tools/apply-muse-overlay.sh"
 echo "Done. Build with: ./tools/build-firmware.sh"

@@ -1,0 +1,49 @@
+diff --git a/src/activities/reader/EpubReaderActivity.cpp b/src/activities/reader/EpubReaderActivity.cpp
+index cee0dc72..73b7f15e 100644
+--- a/src/activities/reader/EpubReaderActivity.cpp
++++ b/src/activities/reader/EpubReaderActivity.cpp
+@@ -1,4 +1,6 @@
+ #include "EpubReaderActivity.h"
++#include "device_protocol/ReadingState.h"   // Margin/Muse
++#include "device_protocol/MuseBleServer.h"  // Margin/Muse
+ 
+ #include <Epub/Page.h>
+ #include <Epub/blocks/TextBlock.h>
+@@ -1333,7 +1335,36 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
+                  ? currentPageVisibleOffset
+                  : section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
+   }
+-  return EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount, offset);
++  const bool ok = EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount, offset);
++  if (ok) {  // Margin/Muse hooks ─────────────────────────────────────────────
++    MuseBleServer::init();  // idempotent; starts advertising on first page turn
++    const int total = epub->getSpineItemsCount();
++    const float prog = total > 0
++      ? (static_cast<float>(spineIndex) +
++         (pageCount > 0 ? static_cast<float>(currentPage) / pageCount : 0.f))
++        / static_cast<float>(total)
++      : 0.f;
++    ReadingState::update(epub->getPath().c_str(), epub->getTitle().c_str(),
++                         epub->getAuthor().c_str(),
++                         static_cast<uint16_t>(spineIndex), offset.value_or(0), prog);
++    if (section && currentPage >= 0 && currentPage < section->pageCount) {
++      if (auto page = section->loadPage(currentPage)) {
++        std::string pageText;
++        pageText.reserve(512);
++        for (const auto& el : page->elements) {
++          if (el->getTag() != TAG_PageLine) continue;
++          const auto& block = static_cast<const PageLine&>(*el).getBlock();
++          if (!block || block->isEmpty()) continue;
++          for (uint16_t i = 0; i < block->wordCount(); i++) {
++            if (!pageText.empty()) pageText += ' ';
++            pageText += block->wordText(i);
++          }
++        }
++        if (!pageText.empty()) MuseBleServer::notifyPageText(pageText.c_str(), pageText.size());
++      }
++    }
++  }  // ─────────────────────────────────────────────────────────────────────
++  return ok;
+ }
+ 
+ void EpubReaderActivity::rememberCurrentContentOffset() {
