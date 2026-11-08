@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f3ee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16140f" media="(prefers-color-scheme: dark)">
+<title>Margin Web</title>
+<!--
+  Margin web companion — a no-install stand-in for the iPhone app.
+  Uses Web Bluetooth (Bluefy on iOS, Chrome on Android/desktop) and the
+  phone's own speech voices. Protocol: shared/protocol/ble.md. Reassembly
+  mirrors companion/src/pageAssembler.ts. Must be served over HTTPS.
+  Limits vs the native app: stops when the screen locks or the app is
+  backgrounded, and "Connect" needs a tap each visit.
+-->
+<script src="vendor/NoSleep.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f3ee; --surface: #ffffff; --text: #1d1b17; --muted: #6b665c;
+    --line: #e4ded3; --accent: #2f5d50; --accent-text: #ffffff; --warn: #9a4a1c;
+    --ok: #2f6b3a; --seg: #ebe6dd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16140f; --surface: #201d17; --text: #ece7dd; --muted: #a39d90;
+      --line: #353027; --accent: #7fb8a6; --accent-text: #10201b; --warn: #e3a072;
+      --ok: #8fcf9a; --seg: #2a2620;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16140f; --surface: #201d17; --text: #ece7dd; --muted: #a39d90;
+    --line: #353027; --accent: #7fb8a6; --accent-text: #10201b; --warn: #e3a072;
+    --ok: #8fcf9a; --seg: #2a2620;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 17px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    max-width: 640px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  h1 { font: 600 22px/1.2 Georgia, "Times New Roman", serif; margin: 0; letter-spacing: 0.01em; }
+  .status { font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .status[data-state="connected"] .dot { background: var(--ok); }
+  .status[data-state="error"] .dot { background: var(--warn); }
+  .status[data-state="busy"] .dot { background: var(--accent); animation: pulse 1s infinite alternate; }
+  @keyframes pulse { to { opacity: 0.3; } }
+  button {
+    font: inherit; border: 0; border-radius: 12px; padding: 14px 18px; min-height: 48px;
+    background: var(--accent); color: var(--accent-text); font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+  button:disabled { opacity: 0.5; }
+  #connect { width: 100%; }
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; background: var(--seg); padding: 4px; border-radius: 14px; margin-top: 16px; }
+  .modes button { background: transparent; color: var(--text); font-weight: 500; font-size: 15px; padding: 10px 6px; min-height: 44px; border-radius: 10px; line-height: 1.2; }
+  .modes button[aria-pressed="true"] { background: var(--surface); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
+  .modes button:disabled { opacity: 0.4; }
+  .mode-hint { font-size: 14px; color: var(--muted); margin: 8px 2px 0; min-height: 1.5em; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-top: 16px; }
+  .page-meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; gap: 8px; }
+  #page { font: 19px/1.6 Georgia, "Times New Roman", serif; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 4em; }
+  #page.empty { color: var(--muted); font-style: italic; }
+  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 14px 0 6px; }
+  .row { display: flex; align-items: center; gap: 12px; }
+  input[type="range"] { flex: 1; accent-color: var(--accent); min-height: 32px; }
+  select { width: 100%; font: inherit; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  .rate-value { font-variant-numeric: tabular-nums; min-width: 3.5em; text-align: right; }
+  .note { font-size: 14px; color: var(--muted); margin-top: 16px; }
+  .note.warn { color: var(--warn); }
+  .voice-settings[hidden] { display: none; }
+  details { margin-top: 16px; font-size: 13px; color: var(--muted); }
+  #log { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; max-height: 240px; overflow: auto; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Margin</h1>
+  <div class="status" id="status" data-state="idle"><span class="dot"></span><span id="status-text">Not connected</span></div>
+</header>
+
+<div id="unsupported" class="note warn" hidden>
+  This browser can't use Bluetooth. On iPhone, open this page in the <strong>Bluefy</strong> app.
+  On Android or a computer, use Chrome.
+</div>
+
+<button id="connect">Connect to Margin</button>
+
+<div class="modes" role="group" aria-label="Reading mode">
+  <button data-mode="self" aria-pressed="false">I'll read</button>
+  <button data-mode="page" aria-pressed="true">Read to me</button>
+  <button data-mode="continuous" aria-pressed="false">Continuous</button>
+</div>
+<p class="mode-hint" id="mode-hint"></p>
+
+<div class="card">
+  <div class="page-meta"><span id="page-label">No page yet</span><span id="stats"></span></div>
+  <p id="page" class="empty">Open a book on the X4 and turn a page.</p>
+</div>
+
+<div class="controls">
+  <button id="replay" class="secondary" disabled>Replay page</button>
+  <button id="pause" class="secondary" disabled>Pause</button>
+</div>
+
+<div class="voice-settings" id="voice-settings">
+  <label for="rate">Speed</label>
+  <div class="row"><input id="rate" type="range" min="0.5" max="1.5" step="0.05" value="0.9"><span class="rate-value" id="rate-value">0.90×</span></div>
+
+  <label for="voice">Voice</label>
+  <select id="voice"><option value="">System default</option></select>
+</div>
+
+<p class="note">The screen stays on while connected. If the phone locks or you switch apps, the connection and speech stop.</p>
+
+<details>
+  <summary>Diagnostics</summary>
+  <pre id="log"></pre>
+</details>
+
+<script>
+"use strict";
+const SERVICE = "4d555345-0001-1000-8000-000000000000";
+const PAGE_CHAR = "4d555345-0002-1000-8000-000000000000";
+const CONTROL_CHAR = "4d555345-0004-1000-8000-000000000000";
+const CMD_NEXT_PAGE = 0x01;
+const NEXT_PAGE_WAIT_MS = 15000; // warn if the X4 hasn't sent the next page by then
+
+// --- Page reassembly: same rules as companion/src/pageAssembler.ts ---------
+class PageAssembler {
+  constructor() { this.reset(); }
+  reset() { this.parts = []; this.total = 0; }
+  // Returns {text, bytes} once the last chunk arrives, null otherwise,
+  // or {discarded: true} when a gap forces the partial page to be dropped.
+  push(chunk) {
+    if (chunk.length < 2) return null;
+    const seq = chunk[0], total = chunk[1];
+    if (seq === 0) {
+      this.reset();
+      this.total = total;
+    } else if (total !== this.total || seq !== this.parts.length) {
+      const hadPartial = this.parts.length > 0;
+      this.reset();
+      return hadPartial ? { discarded: true } : null;
+    }
+    if (seq >= total) { this.reset(); return null; }
+    this.parts.push(chunk.slice(2));
+    if (this.parts.length < this.total) return null;
+    const size = this.parts.reduce((n, p) => n + p.length, 0);
+    const bytes = new Uint8Array(size);
+    let off = 0;
+    for (const p of this.parts) { bytes.set(p, off); off += p.length; }
+    this.reset();
+    return { text: new TextDecoder("utf-8").decode(bytes), bytes: size };
+  }
+}
+
+// --- Settings (per-device convenience only) -------------------------------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("margin." + k); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("margin." + k, v); } catch {} },
+};
+
+const $ = (id) => document.getElementById(id);
+const ui = {
+  status: $("status"), statusText: $("status-text"), connect: $("connect"),
+  page: $("page"), pageLabel: $("page-label"), stats: $("stats"),
+  replay: $("replay"), pause: $("pause"), rate: $("rate"), rateValue: $("rate-value"),
+  voice: $("voice"), voiceSettings: $("voice-settings"), log: $("log"),
+  unsupported: $("unsupported"), modeHint: $("mode-hint"),
+  modeButtons: [...document.querySelectorAll(".modes button")],
+};
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  ui.log.textContent = `${t}  ${msg}\n` + ui.log.textContent.slice(0, 6000);
+}
+function setStatus(state, text) { ui.status.dataset.state = state; ui.statusText.textContent = text; }
+
+// --- Reading mode ---------------------------------------------------------
+// self: no speech · page: speak each page, then stop · continuous: speak, turn, repeat
+let mode = store.get("mode", "page");
+let paused = false;
+let controlChar = null;     // null on firmware without continuous support
+let waitTimer = null;
+
+const HINTS = {
+  self: "Silent. Pages still arrive here, nothing is read aloud.",
+  page: "Reads each page, then waits for you to turn it.",
+  continuous: "Reads the page, turns it on the X4, and keeps going.",
+};
+
+function renderMode() {
+  for (const b of ui.modeButtons) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+  const contBtn = ui.modeButtons.find((b) => b.dataset.mode === "continuous");
+  const connected = device && device.gatt.connected;
+  contBtn.disabled = Boolean(connected && !controlChar);
+  ui.modeHint.textContent = connected && !controlChar && mode !== "self" && contBtn.disabled
+    ? HINTS[mode] + " Continuous needs newer X4 firmware."
+    : HINTS[mode];
+  ui.voiceSettings.hidden = mode === "self";
+  renderPause();
+}
+
+function setMode(next) {
+  if (next === "continuous" && device && device.gatt.connected && !controlChar) return;
+  mode = next;
+  store.set("mode", mode);
+  paused = false;
+  clearWait();
+  if (mode === "self") stopSpeech();
+  renderMode();
+  // Not mid-page: read the current page, then carry on. Mid-page: the page's own
+  // end-of-speech handler sees the new mode and turns the page.
+  if (mode === "continuous" && lastText && !speaking) speakPage(lastText, afterPage);
+}
+for (const b of ui.modeButtons) b.addEventListener("click", () => setMode(b.dataset.mode));
+
+// --- Speech ----------------------------------------------------------------
+const synth = window.speechSynthesis;
+let voices = [];
+let lastText = "";
+let speakToken = 0;   // bumps on every new page / stop; stale utterance events are ignored
+let speaking = false;
+
+// Apple's novelty/effect voices (and eSpeak-style ones) sound robotic by design; never offer them.
+const NOVELTY = /^(albert|bad news|bahh|bells|boing|bubbles|cellos|deranged|fred|good news|hysterical|jester|junior|kathy|organ|pipe organ|ralph|superstar|trinoids|whisper|wobble|zarvox|grandma|grandpa|eddy|flo|reed|rocko|sandy|shelley)\b/i;
+
+let voicesLogged = 0;
+function loadVoices() {
+  if (!synth) return;
+  const all = synth.getVoices();
+  if (all.length && all.length !== voicesLogged) {
+    voicesLogged = all.length;
+    const en = all.filter((v) => (v.lang || "").toLowerCase().startsWith("en"));
+    log(`browser offers ${all.length} voices (${en.length} English):\n  ` +
+        en.map((v) => `${v.name} | ${v.lang} | ${v.voiceURI}${v.default ? " | default" : ""}`).join("\n  "));
+  }
+  voices = all.filter((v) =>
+    v.lang && v.lang.toLowerCase().startsWith("en") &&
+    !NOVELTY.test(v.name) &&
+    !/speech\.synthesis\.voice|eloquence/i.test(v.voiceURI || ""));
+  // Better-sounding voices first: iOS marks them in the voice id (…premium… / …enhanced…).
+  const tier = (v) => { const s = (v.voiceURI || "") + " " + v.name;
+    return /premium/i.test(s) ? 0 : /enhanced|neural|natural/i.test(s) ? 1 : 2; };
+  const tag = ["Premium", "Enhanced", ""];
+  voices.sort((a, b) => tier(a) - tier(b) || a.name.localeCompare(b.name));
+  const saved = store.get("voice", "");
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  ui.voice.innerHTML = '<option value="">System default</option>' +
+    voices.map((v) => { const t = tag[tier(v)]; const name = v.name.replace(/\s*\((Premium|Enhanced)\)\s*/i, "");
+      return `<option value="${esc(v.voiceURI)}">${esc(name)}${t ? " · " + t : ""} (${esc(v.lang)})</option>`; }).join("");
+  ui.voice.value = voices.some((v) => v.voiceURI === saved) ? saved : "";
+}
+
+// Sentence-sized pieces: the last piece ending reliably marks the page as done,
+// and short utterances avoid browsers that cut long speech off silently.
+function splitForSpeech(text) {
+  const sentences = text.replace(/\s+/g, " ").trim().match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*|$)\s*/g) || [];
+  const pieces = [];
+  let cur = "";
+  for (const s of sentences) {
+    if (cur && (cur + s).length > 220) { pieces.push(cur.trim()); cur = ""; }
+    cur += s;
+  }
+  if (cur.trim()) pieces.push(cur.trim());
+  return pieces;
+}
+
+function stopSpeech() {
+  speakToken++;
+  speaking = false;
+  try { if (synth) synth.cancel(); } catch {}
+  renderPause();
+}
+
+function makeUtterance(text) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = parseFloat(ui.rate.value);
+  u.lang = "en-US";
+  const v = voices.find((x) => x.voiceURI === ui.voice.value);
+  if (v) u.voice = v;
+  return u;
+}
+
+// Speaks one page; onDone runs only if the page was read to the end.
+function speakPage(text, onDone) {
+  stopSpeech(); // a new page interrupts the old one
+  if (!synth || mode === "self" || paused) return;
+  const pieces = splitForSpeech(text);
+  if (!pieces.length) { onDone && onDone(); return; }
+  const token = speakToken;
+  speaking = true;
+  renderPause();
+  pieces.forEach((piece, i) => {
+    const u = makeUtterance(piece);
+    u.onerror = (e) => {
+      if (token !== speakToken) return;
+      if (e.error !== "interrupted" && e.error !== "canceled") log("speech error: " + e.error);
+    };
+    if (i === pieces.length - 1) {
+      u.onend = () => {
+        if (token !== speakToken) return; // cancelled or replaced
+        speaking = false;
+        renderPause();
+        onDone && onDone();
+      };
+    }
+    try { synth.speak(u); } catch (e) { log("speech failed: " + e.message); }
+  });
+}
+
+// --- Continuous reading ---------------------------------------------------
+function clearWait() { if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; } }
+
+async function requestNextPage() {
+  if (mode !== "continuous" || paused || !controlChar || !(device && device.gatt.connected)) return;
+  clearWait();
+  try {
+    const cmd = new Uint8Array([CMD_NEXT_PAGE]);
+    if (controlChar.writeValueWithoutResponse) await controlChar.writeValueWithoutResponse(cmd);
+    else await controlChar.writeValue(cmd);
+    setStatus("connected", "Turning page…");
+    waitTimer = setTimeout(() => {
+      setStatus("connected", "Connected");
+      log("no new page from the X4 after " + NEXT_PAGE_WAIT_MS / 1000 + " s (end of book, or the X4 is busy)");
+    }, NEXT_PAGE_WAIT_MS);
+  } catch (e) {
+    log("next-page request failed: " + e.message);
+  }
+}
+
+function afterPage() { if (mode === "continuous") requestNextPage(); }
+
+function renderPause() {
+  const active = mode !== "self" && Boolean(lastText);
+  ui.pause.disabled = !active;
+  ui.pause.textContent = paused ? "Resume" : "Pause";
+}
+ui.pause.addEventListener("click", () => {
+  paused = !paused;
+  clearWait();
+  if (paused) { stopSpeech(); setStatus("connected", device && device.gatt.connected ? "Paused" : "Disconnected"); }
+  else { if (device && device.gatt.connected) setStatus("connected", "Connected"); speakPage(lastText, afterPage); }
+  renderPause();
+});
+
+// --- Bluetooth -------------------------------------------------------------
+const assembler = new PageAssembler();
+let device = null, pages = 0, discarded = 0, reconnecting = false;
+const noSleep = window.NoSleep ? new window.NoSleep() : null;
+
+function updateStats() { ui.stats.textContent = discarded ? `${pages} pages · ${discarded} dropped` : `${pages} pages`; }
+
+function onPage(text, bytes) {
+  clearWait();
+  if (device && device.gatt.connected && !paused) setStatus("connected", "Connected");
+  if (!text.trim()) {  // image or blank page: nothing to read
+    log("page without text" + (mode === "continuous" && !paused ? ", skipping ahead" : ""));
+    ui.pageLabel.textContent = "Page without text";
+    if (mode === "continuous" && !paused) setTimeout(requestNextPage, 400);
+    return;
+  }
+  pages++;
+  lastText = text;
+  ui.page.textContent = text;
+  ui.page.classList.remove("empty");
+  ui.pageLabel.textContent = `Page ${pages} · ${bytes} bytes`;
+  ui.replay.disabled = false;
+  updateStats();
+  renderPause();
+  speakPage(text, afterPage);
+}
+
+function onChunk(event) {
+  const dv = event.target.value;
+  const res = assembler.push(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+  if (!res) return;
+  if (res.discarded) { discarded++; updateStats(); log("partial page dropped (missed chunk)"); return; }
+  onPage(res.text, res.bytes);
+}
+
+async function attach() {
+  setStatus("busy", "Connecting…");
+  const server = await device.gatt.connect();
+  const service = await server.getPrimaryService(SERVICE);
+  const ch = await service.getCharacteristic(PAGE_CHAR);
+  try { controlChar = await service.getCharacteristic(CONTROL_CHAR); }
+  catch { controlChar = null; log("X4 firmware has no page-turn control; continuous mode unavailable"); }
+  if (!controlChar && mode === "continuous") { mode = "page"; store.set("mode", mode); }
+  ch.removeEventListener("characteristicvaluechanged", onChunk);
+  ch.addEventListener("characteristicvaluechanged", onChunk);
+  await ch.startNotifications();
+  assembler.reset();
+  setStatus("connected", "Connected");
+  ui.connect.textContent = "Disconnect";
+  log("connected to " + (device.name || device.id) + (controlChar ? " (continuous supported)" : ""));
+  renderMode();
+}
+
+async function onDisconnected() {
+  clearWait();
+  setStatus("idle", "Disconnected");
+  ui.connect.textContent = "Connect to Margin";
+  log("disconnected");
+  renderMode();
+  if (!device || reconnecting) return;
+  // The X4 restarts advertising after a disconnect; try to get it back.
+  reconnecting = true;
+  for (let i = 0; i < 5 && device && !device.gatt.connected; i++) {
+    await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
+    try { await attach(); } catch (e) { log("reconnect " + (i + 1) + " failed: " + e.message); setStatus("idle", "Disconnected"); }
+  }
+  reconnecting = false;
+}
+
+function keepScreenOn() {
+  // Must run inside a tap on iOS. NoSleep uses the Wake Lock API where it exists,
+  // otherwise a silent looping video.
+  if (!noSleep) { log("screen-on helper failed to load"); return; }
+  if (noSleep.isEnabled) return;
+  noSleep.enable().then(() => log("screen will stay on")).catch((e) => log("could not keep screen on: " + e.message));
+}
+
+ui.connect.addEventListener("click", async () => {
+  if (device && device.gatt.connected) {
+    const d = device; device = null; controlChar = null; clearWait(); stopSpeech();
+    try { noSleep && noSleep.disable(); } catch {}
+    d.gatt.disconnect(); renderMode(); return;
+  }
+  keepScreenOn();
+  // iOS only lets a page talk after a tap: say something short now so later pages can be spoken.
+  try {
+    if (synth && mode !== "self") { synth.cancel(); synth.speak(makeUtterance("Margin is ready.")); }
+  } catch (e) { log("speech unavailable: " + e.message); }
+  try {
+    setStatus("busy", "Choose Margin…");
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }, { name: "Margin" }], optionalServices: [SERVICE] });
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    await attach();
+  } catch (e) {
+    log("connect failed: " + e.name + ": " + e.message);
+    setStatus(e.name === "NotFoundError" ? "idle" : "error", e.name === "NotFoundError" ? "Not connected" : "Couldn't connect");
+    device = null;
+    renderMode();
+  }
+});
+
+ui.replay.addEventListener("click", () => { paused = false; speakPage(lastText, afterPage); });
+ui.rate.addEventListener("input", () => { ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×"; store.set("rate", ui.rate.value); });
+ui.voice.addEventListener("change", () => {
+  store.set("voice", ui.voice.value);
+  if (lastText && mode !== "self" && !speaking) { const first = splitForSpeech(lastText)[0]; if (first) speakPage(first); }
+});
+
+// --- Init ------------------------------------------------------------------
+if (!HINTS[mode]) mode = "page";
+ui.rate.value = store.get("rate", "0.9");
+ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×";
+if (synth) { loadVoices(); synth.addEventListener?.("voiceschanged", loadVoices); }
+if (!navigator.bluetooth) {
+  ui.unsupported.hidden = false;
+  ui.connect.disabled = true;
+  log("navigator.bluetooth missing (secure context: " + window.isSecureContext + ")");
+}
+renderMode();
+updateStats();
+</script>
+</body>
+</html>
