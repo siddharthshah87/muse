@@ -46,7 +46,7 @@ APP0_OFFSET    = 0x10000
 #   uint32_t ota_seq;         // 4 — sequence number; odd → ota_0, even → ota_1
 #   uint8_t  seq_label[20];   // 20 — unused, 0xFF
 #   uint32_t ota_state;       // 4
-#   uint32_t crc;             // 4 — CRC32 of the 28 bytes above
+#   uint32_t crc;             // 4 — CRC32 of ota_seq ONLY (4 bytes)
 # ---------------------------------------------------------------------------
 OTA_SECTOR_SIZE = 0x1000      # entries are sector-aligned within otadata
 OTA_STATE_VALID = 0xFFFFFFFD  # already validated; no rollback countdown
@@ -56,15 +56,22 @@ OTA_STATE_VALID = 0xFFFFFFFD  # already validated; no rollback countdown
 OTA0_SEQ = 1  # smallest valid seq that maps to ota_0
 
 
-def _crc32(data: bytes) -> int:
-    """CRC32 matching esp_rom_crc32_le(UINT32_MAX, data, len)."""
-    return zlib.crc32(data) & 0xFFFFFFFF
+def _ota_seq_crc(seq: int) -> int:
+    """CRC the bootloader expects for an OTA select entry.
+
+    ESP-IDF: bootloader_common_ota_select_crc() =
+    esp_rom_crc32_le(UINT32_MAX, &ota_seq, 4) — over the sequence number
+    only, seeded with 0xFFFFFFFF (same as app_update/otatool.py). An entry
+    with any other CRC is ignored and the bootloader silently falls back
+    to its default (ota_0 here), so a wrong CRC can look like it works.
+    """
+    return zlib.crc32(struct.pack("<I", seq), 0xFFFFFFFF) & 0xFFFFFFFF
 
 
 def _make_ota_entry(seq: int, state: int = OTA_STATE_VALID) -> bytes:
     """Build one 32-byte OTA select entry."""
     body = struct.pack("<I", seq) + b"\xff" * 20 + struct.pack("<I", state)
-    return body + struct.pack("<I", _crc32(body))
+    return body + struct.pack("<I", _ota_seq_crc(seq))
 
 
 def build_otadata() -> bytes:
