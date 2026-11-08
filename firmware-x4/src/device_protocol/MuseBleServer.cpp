@@ -20,6 +20,8 @@
 static constexpr size_t   CHUNK_PAYLOAD          = 180;
 static constexpr size_t   MAX_TEXT               = 4096;
 static constexpr uint8_t  CMD_NEXT_PAGE          = 0x01;
+static constexpr uint8_t  CMD_PEEK_NEXT          = 0x02;
+static constexpr uint8_t  PREVIEW_FLAG           = 0x80;  // set on seq for next-page previews
 static constexpr uint32_t TURN_REQUEST_TTL_MS    = 3000;
 
 static void emitTraceLine(const char* line) { logSerial.println(line); }
@@ -38,6 +40,7 @@ static NimBLECharacteristic*   _pageTextChar    = nullptr;
 // Written from the NimBLE host task, read from the main loop. 0 = none.
 static std::atomic<uint32_t>   _turnRequestMs{0};
 static std::atomic<uint32_t>   _lastControlMs{0};
+static std::atomic<uint32_t>   _peekRequestMs{0};
 
 // millis() with 0 reserved for "never".
 static uint32_t nowStamp() { const uint32_t t = millis(); return t ? t : 1; }
@@ -51,6 +54,9 @@ class ControlCallbacks : public NimBLECharacteristicCallbacks {
         if (v.data()[0] == CMD_NEXT_PAGE) {
             _turnRequestMs.store(now);
             muse_trace_log("CTRL", "next page requested");
+        } else if (v.data()[0] == CMD_PEEK_NEXT) {
+            _peekRequestMs.store(now);
+            muse_trace_log("CTRL", "next page preview requested");
         } else {
             muse_trace_log("CTRL", "unknown command 0x%02x", (unsigned)v.data()[0]);
         }
@@ -123,12 +129,17 @@ bool MuseBleServer::takePageTurnRequest() {
     return t != 0 && millis() - t < TURN_REQUEST_TTL_MS;
 }
 
+bool MuseBleServer::takePeekRequest() {
+    const uint32_t t = _peekRequestMs.exchange(0);
+    return t != 0 && millis() - t < TURN_REQUEST_TTL_MS;
+}
+
 bool MuseBleServer::controlledWithin(uint32_t windowMs) {
     const uint32_t t = _lastControlMs.load();
     return t != 0 && millis() - t < windowMs;
 }
 
-void MuseBleServer::notifyPageText(const char* text, size_t len) {
+void MuseBleServer::notifyPageText(const char* text, size_t len, bool preview) {
     // Auto-flush trace ring every 8 page turns
     static uint8_t _flushCounter = 0;
     if (++_flushCounter >= 8) {
@@ -136,8 +147,8 @@ void MuseBleServer::notifyPageText(const char* text, size_t len) {
         muse_trace_flush(emitTraceLine);
     }
 
-    muse_trace_log("PAGE", "notify init=%d conn=%d len=%u",
-                   (int)_initialized, (int)_clientConnected, (unsigned)len);
+    muse_trace_log("PAGE", "notify init=%d conn=%d len=%u preview=%d",
+                   (int)_initialized, (int)_clientConnected, (unsigned)len, (int)preview);
     LOG_INF("MBLE", "notifyPageText: init=%d connected=%d len=%u",
             (int)_initialized, (int)_clientConnected, (unsigned)len);
     if (!_initialized || !_clientConnected || !_pageTextChar) return;
@@ -151,7 +162,7 @@ void MuseBleServer::notifyPageText(const char* text, size_t len) {
     for (uint8_t seq = 0; seq < totalChunks; ++seq) {
         const size_t offset   = seq * CHUNK_PAYLOAD;
         const size_t chunkLen = std::min(CHUNK_PAYLOAD, len - offset);
-        buf[0] = seq;
+        buf[0] = preview ? static_cast<uint8_t>(seq | PREVIEW_FLAG) : seq;
         buf[1] = totalChunks;
         memcpy(buf + 2, text + offset, chunkLen);
         _pageTextChar->setValue(buf, 2 + chunkLen);

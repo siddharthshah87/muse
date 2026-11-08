@@ -2,7 +2,8 @@
 // Margin/Muse — BLE GATT server that pushes page text to the companion app.
 // Service UUID:        4D555345-0001-1000-8000-000000000000  ("MUSE")
 // Page-text char UUID: 4D555345-0002-1000-8000-000000000000
-// Control char UUID:   4D555345-0004-1000-8000-000000000000 (write 0x01 = next page)
+// Control char UUID:   4D555345-0004-1000-8000-000000000000
+//                      (write 0x01 = next page, 0x02 = send next page's text without turning)
 //
 // Protocol: each notify carries [seq:u8][total:u8][utf8 payload…]
 // seq 0..(total-1) form a complete page, sent in order; receiver concatenates
@@ -21,10 +22,14 @@ public:
     // subscribed. text must remain valid for the duration of the call.
     // Text longer than 4096 bytes is cut at the last whole UTF-8 character.
     // len == 0 sends one empty chunk so the companion sees text-less pages.
-    static void notifyPageText(const char* text, size_t len);
+    // preview = true marks a next-page preview (0x80 set on every seq byte).
+    static void notifyPageText(const char* text, size_t len, bool preview = false);
 
     // True once per companion NEXT_PAGE write, if it is under 3 s old.
     static bool takePageTurnRequest();
+
+    // True once per companion PEEK_NEXT write, if it is under 3 s old.
+    static bool takePeekRequest();
 
     // True if the companion wrote any control command in the last windowMs.
     static bool controlledWithin(uint32_t windowMs);

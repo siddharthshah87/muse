@@ -58,9 +58,18 @@ Inter-chunk delay: 5 ms (firmware-side `delay(5)` between `notify()` calls).
 | Byte | Command | Effect |
 |------|---------|--------|
 | `0x01` | `NEXT_PAGE` | The reader turns forward as if the page-forward button were pressed, through the same debounce. |
+| `0x02` | `PEEK_NEXT` | The reader sends the **next** page's text as a preview, without turning. |
+
+A preview uses the page-text format with `0x80` set on every `seq` byte
+(`[0x80|seq][total][utf8…]`). An empty preview (`[0x80][0x01]`) means the next
+page is not available yet (e.g. it is in a chapter not laid out yet) or has no
+text; the companion then turns first and reads the page when it arrives.
+Companions that predate previews discard these chunks (their `seq` never
+matches), so previews are only sent when asked for.
 
 A `NEXT_PAGE` is ignored outside the reader, on the last page of the book (it
-does not leave the book), and if the reader has not consumed it within 3 s. Any
+does not leave the book), and if the reader has not consumed it within 3 s
+(`PEEK_NEXT` likewise expires after 3 s). Any
 control write also holds off auto-sleep for 2 minutes, so the X4 stays awake
 while a companion is reading aloud continuously.
 
@@ -78,9 +87,16 @@ should detect its absence and offer only the manual modes.
    - after chunk `total - 1`, concatenate the bytes, decode UTF-8, and pass
      the text to `Speech.speak()`.
 4. Interrupt any in-progress speech before speaking the new page.
-   Reading modes (web companion): *I'll read* (no speech), *Read to me* (speak
-   each page, stop), *Read continuously* (when a page finishes speaking, write
-   `NEXT_PAGE`; an empty page triggers `NEXT_PAGE` immediately).
+   Reading modes: *I'll read* (no speech), *Read to me* (speak each page,
+   stop), *Continuous* (when a page finishes speaking, write `NEXT_PAGE`; an
+   empty page triggers `NEXT_PAGE` immediately).
+   Gapless continuous reading: after a page arrives, write `PEEK_NEXT` and
+   prepare the preview's audio while the page is read; when it finishes, write
+   `NEXT_PAGE` and start the preview at once. The real page that follows the
+   turn is then only a confirmation: if its text equals the preview, keep
+   going; if not (the reader jumped), speak the real page instead. If no
+   preview arrives within ~2 s, assume firmware without `PEEK_NEXT` and fall
+   back to turn-then-read.
 5. Background mode: declare `bluetooth-central` + `audio` in `UIBackgroundModes`
    so the app keeps the BLE connection and can speak while the screen is off.
 

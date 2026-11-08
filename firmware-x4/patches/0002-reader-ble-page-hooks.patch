@@ -1,5 +1,5 @@
 diff --git a/src/activities/reader/EpubReaderActivity.cpp b/src/activities/reader/EpubReaderActivity.cpp
-index cee0dc72..54754bf1 100644
+index cee0dc72..ace4b2c6 100644
 --- a/src/activities/reader/EpubReaderActivity.cpp
 +++ b/src/activities/reader/EpubReaderActivity.cpp
 @@ -1,4 +1,6 @@
@@ -9,7 +9,32 @@ index cee0dc72..54754bf1 100644
  
  #include <Epub/Page.h>
  #include <Epub/blocks/TextBlock.h>
-@@ -506,6 +508,12 @@ void EpubReaderActivity::loop() {
+@@ -288,6 +290,24 @@ void EpubReaderActivity::openDictionaryWordSelect() {
+                          [this](const ActivityResult&) { requestUpdate(); });
+ }
+ 
++// Margin/Muse: the words of one laid-out page, space-joined (the companion's narration text).
++static bool museLoadPageText(Section& section, int pageIndex, std::string& out) {
++  out.clear();
++  auto page = section.loadPage(pageIndex);
++  if (!page) return false;
++  out.reserve(512);
++  for (const auto& el : page->elements) {
++    if (el->getTag() != TAG_PageLine) continue;
++    const auto& block = static_cast<const PageLine&>(*el).getBlock();
++    if (!block || block->isEmpty()) continue;
++    for (uint16_t i = 0; i < block->wordCount(); i++) {
++      if (!out.empty()) out += ' ';
++      out += block->wordText(i);
++    }
++  }
++  return true;
++}
++
+ void EpubReaderActivity::loop() {
+   if (!epub) {
+     finish();
+@@ -506,6 +526,25 @@ void EpubReaderActivity::loop() {
      return;
    }
  
@@ -18,11 +43,24 @@ index cee0dc72..54754bf1 100644
 +  if (MuseBleServer::takePageTurnRequest() && section && !atEndOfBook && pendingManualTurn == 0) {
 +    pendingManualTurn = 1;
 +  }
++  // Margin/Muse: send the next page's text without turning, so the companion can prepare its
++  // audio and turn exactly when the current page finishes. Empty preview = not available yet
++  // (next chapter not laid out); the companion then turns first and reads after.
++  if (!RenderLock::peek() && MuseBleServer::takePeekRequest()) {
++    std::string nextText;
++    bool have = false;
++    if (section && !atEndOfBook && section->currentPage + 1 < static_cast<int>(section->pageCount)) {
++      RenderLock lock;
++      have = museLoadPageText(*section, section->currentPage + 1, nextText);
++    }
++    if (!have) nextText.clear();
++    MuseBleServer::notifyPageText(nextText.c_str(), nextText.size(), /*preview=*/true);
++  }
 +
    constexpr unsigned long kMinManualTurnGapMs = 200;
    const bool turnGuardActive = RenderLock::peek() || (millis() - lastPageTurnTime) < kMinManualTurnGapMs;
    if (pendingManualTurn != 0 && !turnGuardActive) {
-@@ -1333,9 +1341,41 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
+@@ -1333,9 +1372,31 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
                   ? currentPageVisibleOffset
                   : section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
    }
@@ -40,18 +78,8 @@ index cee0dc72..54754bf1 100644
 +                         epub->getAuthor().c_str(),
 +                         static_cast<uint16_t>(spineIndex), offset.value_or(0), prog);
 +    if (section && currentPage >= 0 && currentPage < section->pageCount) {
-+      if (auto page = section->loadPage(currentPage)) {
-+        std::string pageText;
-+        pageText.reserve(512);
-+        for (const auto& el : page->elements) {
-+          if (el->getTag() != TAG_PageLine) continue;
-+          const auto& block = static_cast<const PageLine&>(*el).getBlock();
-+          if (!block || block->isEmpty()) continue;
-+          for (uint16_t i = 0; i < block->wordCount(); i++) {
-+            if (!pageText.empty()) pageText += ' ';
-+            pageText += block->wordText(i);
-+          }
-+        }
++      std::string pageText;
++      if (museLoadPageText(*section, currentPage, pageText)) {
 +        MuseBleServer::notifyPageText(pageText.c_str(), pageText.size());  // empty pages too
 +      }
 +    }
