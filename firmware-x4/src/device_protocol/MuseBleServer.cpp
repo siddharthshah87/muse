@@ -7,14 +7,20 @@
 #include <freertos/task.h>
 #include <esp_heap_caps.h>
 
+#include <Arduino.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #define MUSE_SERVICE_UUID   "4D555345-0001-1000-8000-000000000000"
 #define PAGE_TEXT_CHAR_UUID "4D555345-0002-1000-8000-000000000000"
+#define CONTROL_CHAR_UUID   "4D555345-0004-1000-8000-000000000000"
 
-static constexpr size_t  CHUNK_PAYLOAD = 180;
-static constexpr size_t  MAX_TEXT      = 4096;
+static constexpr size_t   CHUNK_PAYLOAD          = 180;
+static constexpr size_t   MAX_TEXT               = 4096;
+static constexpr uint8_t  CMD_NEXT_PAGE          = 0x01;
+static constexpr uint32_t TURN_REQUEST_TTL_MS    = 3000;
 
 static void emitTraceLine(const char* line) { logSerial.println(line); }
 
@@ -29,6 +35,27 @@ static bool                    _initialized     = false;
 static bool                    _clientConnected = false;
 static NimBLEServer*           _server          = nullptr;
 static NimBLECharacteristic*   _pageTextChar    = nullptr;
+// Written from the NimBLE host task, read from the main loop. 0 = none.
+static std::atomic<uint32_t>   _turnRequestMs{0};
+static std::atomic<uint32_t>   _lastControlMs{0};
+
+// millis() with 0 reserved for "never".
+static uint32_t nowStamp() { const uint32_t t = millis(); return t ? t : 1; }
+
+class ControlCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr) override {
+        const NimBLEAttValue v = chr->getValue();
+        if (v.length() < 1) return;
+        const uint32_t now = nowStamp();
+        _lastControlMs.store(now);
+        if (v.data()[0] == CMD_NEXT_PAGE) {
+            _turnRequestMs.store(now);
+            muse_trace_log("CTRL", "next page requested");
+        } else {
+            muse_trace_log("CTRL", "unknown command 0x%02x", (unsigned)v.data()[0]);
+        }
+    }
+};
 
 class MuseCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* srv) override {
@@ -58,6 +85,10 @@ static void bleInitTask(void*) {
     muse_trace_log("BLE", "service created");
     _pageTextChar = svc->createCharacteristic(
         PAGE_TEXT_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
+    NimBLECharacteristic* control = svc->createCharacteristic(
+        CONTROL_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    // Lives for the life of the BLE stack, like the server callbacks above.
+    control->setCallbacks(new ControlCallbacks());
     svc->start();
 
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -87,6 +118,16 @@ void MuseBleServer::init() {
 
 bool MuseBleServer::isConnected() { return _clientConnected; }
 
+bool MuseBleServer::takePageTurnRequest() {
+    const uint32_t t = _turnRequestMs.exchange(0);
+    return t != 0 && millis() - t < TURN_REQUEST_TTL_MS;
+}
+
+bool MuseBleServer::controlledWithin(uint32_t windowMs) {
+    const uint32_t t = _lastControlMs.load();
+    return t != 0 && millis() - t < windowMs;
+}
+
 void MuseBleServer::notifyPageText(const char* text, size_t len) {
     // Auto-flush trace ring every 8 page turns
     static uint8_t _flushCounter = 0;
@@ -99,11 +140,12 @@ void MuseBleServer::notifyPageText(const char* text, size_t len) {
                    (int)_initialized, (int)_clientConnected, (unsigned)len);
     LOG_INF("MBLE", "notifyPageText: init=%d connected=%d len=%u",
             (int)_initialized, (int)_clientConnected, (unsigned)len);
-    if (!_initialized || !_clientConnected || !_pageTextChar || len == 0) return;
+    if (!_initialized || !_clientConnected || !_pageTextChar) return;
 
     if (len > MAX_TEXT) len = utf8Boundary(text, MAX_TEXT);
-    const uint8_t totalChunks =
-        static_cast<uint8_t>((len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD);
+    // A page with no text still goes out as one empty chunk (see ble.md).
+    const uint8_t totalChunks = len == 0
+        ? 1 : static_cast<uint8_t>((len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD);
 
     uint8_t buf[2 + CHUNK_PAYLOAD];
     for (uint8_t seq = 0; seq < totalChunks; ++seq) {

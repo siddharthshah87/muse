@@ -1,5 +1,5 @@
 diff --git a/src/activities/reader/EpubReaderActivity.cpp b/src/activities/reader/EpubReaderActivity.cpp
-index cee0dc72..73b7f15e 100644
+index cee0dc72..54754bf1 100644
 --- a/src/activities/reader/EpubReaderActivity.cpp
 +++ b/src/activities/reader/EpubReaderActivity.cpp
 @@ -1,4 +1,6 @@
@@ -9,7 +9,20 @@ index cee0dc72..73b7f15e 100644
  
  #include <Epub/Page.h>
  #include <Epub/blocks/TextBlock.h>
-@@ -1333,7 +1335,36 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
+@@ -506,6 +508,12 @@ void EpubReaderActivity::loop() {
+     return;
+   }
+ 
++  // Margin/Muse: next-page request from the companion (continuous read-aloud).
++  // Queued like a button press; never leaves the book at the end.
++  if (MuseBleServer::takePageTurnRequest() && section && !atEndOfBook && pendingManualTurn == 0) {
++    pendingManualTurn = 1;
++  }
++
+   constexpr unsigned long kMinManualTurnGapMs = 200;
+   const bool turnGuardActive = RenderLock::peek() || (millis() - lastPageTurnTime) < kMinManualTurnGapMs;
+   if (pendingManualTurn != 0 && !turnGuardActive) {
+@@ -1333,9 +1341,41 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
                   ? currentPageVisibleOffset
                   : section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
    }
@@ -39,11 +52,28 @@ index cee0dc72..73b7f15e 100644
 +            pageText += block->wordText(i);
 +          }
 +        }
-+        if (!pageText.empty()) MuseBleServer::notifyPageText(pageText.c_str(), pageText.size());
++        MuseBleServer::notifyPageText(pageText.c_str(), pageText.size());  // empty pages too
 +      }
 +    }
 +  }  // ─────────────────────────────────────────────────────────────────────
 +  return ok;
  }
  
++// Margin/Muse: stay awake while the companion is driving page turns.
++bool EpubReaderActivity::preventAutoSleep() { return MuseBleServer::controlledWithin(2 * 60 * 1000UL); }
++
  void EpubReaderActivity::rememberCurrentContentOffset() {
+   cachedVisibleTextOffset.reset();
+   if (section && section->currentPage >= 0 && section->currentPage < section->pageCount) {
+diff --git a/src/activities/reader/EpubReaderActivity.h b/src/activities/reader/EpubReaderActivity.h
+index 2a780876..4bb6d16e 100644
+--- a/src/activities/reader/EpubReaderActivity.h
++++ b/src/activities/reader/EpubReaderActivity.h
+@@ -118,6 +118,7 @@ class EpubReaderActivity final : public ReaderActivity {
+   ~EpubReaderActivity() override;
+ 
+   void loop() override;
++  bool preventAutoSleep() override;  // Margin/Muse
+ 
+   bool pageTurn(bool isForward) override;
+   bool skipPages(int amount) override;
