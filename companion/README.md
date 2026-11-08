@@ -18,8 +18,8 @@ AI narration companion for the X4 Pro e-reader.
 
 ## Prerequisites
 
-- iPhone on iOS 16+
-- Node 18+
+- iPhone on iOS 17+ (deployment target set in `app.json` via `expo-build-properties`)
+- Node 20.19.4+ (Expo SDK 55 / React Native 0.83)
 - Free [Expo account](https://expo.dev/signup)
 
 ## First-time setup (no Xcode needed)
@@ -44,7 +44,8 @@ npx expo start
 ```
 
 Standard Expo Go will not work because `react-native-ble-plx` requires native
-modules.
+modules. A dev build made before the Expo SDK 55 upgrade will not load the
+current JS; make a fresh `eas build --profile development --platform ios`.
 
 ## Usage
 
@@ -87,4 +88,4 @@ See `shared/protocol/ble.md` for the page-text transport contract and
 - Pause on voice detection (ambient audio privacy boundary)
 - Push-to-talk discussion grounded in the current passage
 - Highlight sync: X4 highlights the sentence being spoken
-- On-device neural voice (Kokoro via react-native-executorch; needs Expo SDK 55+)
+- On-device neural voice (Kokoro via react-native-executorch; app is on Expo SDK 55, New Architecture, iOS 17+)

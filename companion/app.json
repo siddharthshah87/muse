@@ -18,8 +18,7 @@
           "bluetooth-central",
           "audio",
           "fetch"
-        ],
-        "AVAudioSessionCategory": "AVAudioSessionCategoryPlayback"
+        ]
       }
     },
     "extra": {
@@ -27,6 +26,16 @@
         "projectId": "6e439c5c-59fe-4470-99aa-12cc23953e8d"
       }
     },
-    "owner": "siddharthshah87"
+    "owner": "siddharthshah87",
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "17.0"
+          }
+        }
+      ]
+    ]
   }
 }
