@@ -16,7 +16,6 @@
         "AVAudioSessionCategory": "AVAudioSessionCategoryPlayback"
       }
     },
-    "plugins": ["expo-speech"],
     "extra": {
       "eas": {
         "projectId": "YOUR_EAS_PROJECT_ID"

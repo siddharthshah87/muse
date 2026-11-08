@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BleError, BleManager, Characteristic, Device } from 'react-native-ble-plx';
 import * as Speech from 'expo-speech';
-import { atob } from 'react-native';
+import { PageAssembler, base64ToBytes } from './pageAssembler';
 
 export const MUSE_SERVICE_UUID = '4D555345-0001-1000-8000-000000000000';
 export const PAGE_TEXT_CHAR_UUID = '4D555345-0002-1000-8000-000000000000';
-export const BOOK_METADATA_CHAR_UUID = '4D555345-0003-1000-8000-000000000000';
 
 export type BleStatus =
   | 'idle'
@@ -14,12 +13,6 @@ export type BleStatus =
   | 'connected'
   | 'disconnected'
   | 'error';
-
-interface BookMetadata {
-  title?: string;
-  author?: string;
-  page?: number;
-}
 
 export interface UseMuseBleOptions {
   voice?: string | null;
@@ -33,9 +26,6 @@ export interface UseMuseBleResult {
   status: BleStatus;
   deviceName: string | null;
   lastPageText: string | null;
-  bookTitle: string | null;
-  bookAuthor: string | null;
-  currentPage: number | null;
   isSpeaking: boolean;
   audioDisconnected: boolean;
   connect: () => void;
@@ -43,19 +33,18 @@ export interface UseMuseBleResult {
   replayLastPage: () => void;
 }
 
-function decodeBase64Text(value: string) {
-  const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
 function clampRate(rate: number) {
   return Math.max(0.5, Math.min(2, rate));
 }
 
 export function useMuseBle({ voice, rate, muted, autoConnect, onPageText }: UseMuseBleOptions): UseMuseBleResult {
-  const manager = useRef(new BleManager()).current;
+  const managerRef = useRef<BleManager | null>(null);
+  if (!managerRef.current) {
+    managerRef.current = new BleManager();
+  }
+  const manager = managerRef.current;
   const deviceRef = useRef<Device | null>(null);
-  const chunkBuf = useRef<Map<number, string>>(new Map());
+  const assemblerRef = useRef(new PageAssembler());
   const monitorSubscriptions = useRef<Array<{ remove: () => void }>>([]);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef(false);
@@ -67,9 +56,6 @@ export function useMuseBle({ voice, rate, muted, autoConnect, onPageText }: UseM
   const [status, setStatus] = useState<BleStatus>('idle');
   const [deviceName, setDeviceName] = useState<string | null>(null);
   const [lastPageText, setLastPageText] = useState<string | null>(null);
-  const [bookTitle, setBookTitle] = useState<string | null>(null);
-  const [bookAuthor, setBookAuthor] = useState<string | null>(null);
-  const [currentPage, setCurrentPage] = useState<number | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [audioDisconnected, setAudioDisconnected] = useState(false);
 
@@ -133,41 +119,14 @@ export function useMuseBle({ voice, rate, muted, autoConnect, onPageText }: UseM
     [rate, voice],
   );
 
-  const handleMetadata = useCallback((characteristic: Characteristic) => {
-    if (!characteristic.value) {
-      return;
-    }
-
-    try {
-      const metadata = JSON.parse(decodeBase64Text(characteristic.value)) as BookMetadata;
-      setBookTitle(typeof metadata.title === 'string' ? metadata.title : null);
-      setBookAuthor(typeof metadata.author === 'string' ? metadata.author : null);
-      setCurrentPage(typeof metadata.page === 'number' ? metadata.page : null);
-    } catch {
-      // Ignore malformed or partially rolled-out metadata payloads.
-    }
-  }, []);
-
   const handleChunk = useCallback(
     (characteristic: Characteristic) => {
       if (!characteristic.value) {
         return;
       }
 
-      const bytes = Uint8Array.from(atob(characteristic.value), (char) => char.charCodeAt(0));
-      if (bytes.length < 2) {
-        return;
-      }
-
-      const seq = bytes[0];
-      const total = bytes[1];
-      const text = new TextDecoder().decode(bytes.slice(2));
-
-      chunkBuf.current.set(seq, text);
-
-      if (chunkBuf.current.size === total) {
-        const assembled = Array.from({ length: total }, (_, index) => chunkBuf.current.get(index) ?? '').join('');
-        chunkBuf.current.clear();
+      const assembled = assemblerRef.current.push(base64ToBytes(characteristic.value));
+      if (assembled !== null) {
         setLastPageText(assembled);
         setAudioDisconnected(false);
         onPageText?.(assembled);
@@ -184,7 +143,7 @@ export function useMuseBle({ voice, rate, muted, autoConnect, onPageText }: UseM
 
     manualDisconnectRef.current = false;
     clearReconnectTimer();
-    chunkBuf.current.clear();
+    assemblerRef.current.reset();
     clearSubscriptions();
     manager.stopDeviceScan();
     setStatus('scanning');
@@ -231,24 +190,6 @@ export function useMuseBle({ voice, rate, muted, autoConnect, onPageText }: UseM
 
           monitorSubscriptions.current.push(pageSubscription);
 
-          try {
-            const metadataSubscription = connected.monitorCharacteristicForService(
-              MUSE_SERVICE_UUID,
-              BOOK_METADATA_CHAR_UUID,
-              (metadataError, characteristic) => {
-                if (metadataError || !characteristic) {
-                  return;
-                }
-
-                handleMetadata(characteristic);
-              },
-            );
-
-            monitorSubscriptions.current.push(metadataSubscription);
-          } catch {
-            // Older firmware may not expose metadata yet.
-          }
-
           connected.onDisconnected(() => {
             clearSubscriptions();
             deviceRef.current = null;
@@ -262,7 +203,7 @@ export function useMuseBle({ voice, rate, muted, autoConnect, onPageText }: UseM
         }
       },
     );
-  }, [clearReconnectTimer, clearSubscriptions, handleChunk, handleMetadata, manager]);
+  }, [clearReconnectTimer, clearSubscriptions, handleChunk, manager]);
 
   const disconnect = useCallback(() => {
     manualDisconnectRef.current = true;
@@ -333,9 +274,6 @@ export function useMuseBle({ voice, rate, muted, autoConnect, onPageText }: UseM
     status,
     deviceName,
     lastPageText,
-    bookTitle,
-    bookAuthor,
-    currentPage,
     isSpeaking,
     audioDisconnected,
     connect,

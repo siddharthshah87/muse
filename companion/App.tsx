@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  DimensionValue,
   Easing,
   LayoutChangeEvent,
   Modal,
@@ -36,6 +37,7 @@ const COLORS = {
 
 const DEFAULT_BOOK_TITLE = 'Waiting for your next page';
 const DEFAULT_BOOK_AUTHOR = 'Margin companion';
+const READING_TITLE = 'Reading on your X4';
 
 function formatVoiceName(identifier: string | null, availableVoices: Speech.Voice[]) {
   if (!identifier) {
@@ -67,7 +69,7 @@ function RateSlider({ value, onChange }: { value: number; onChange: (value: numb
     onChange(Number(nextValue.toFixed(2)));
   };
 
-  const left = `${((clampRate(value) - 0.5) / 1.5) * 100}%`;
+  const left: DimensionValue = `${((clampRate(value) - 0.5) / 1.5) * 100}%`;
 
   return (
     <View>
@@ -203,9 +205,6 @@ export default function App() {
     status,
     deviceName,
     lastPageText,
-    bookTitle,
-    bookAuthor,
-    currentPage,
     isSpeaking,
     audioDisconnected,
     connect,
@@ -233,8 +232,9 @@ export default function App() {
     }
   }, [audioDisconnected, lastPageText, screen, status]);
 
-  const activeTitle = bookTitle?.trim() || DEFAULT_BOOK_TITLE;
-  const activeAuthor = bookAuthor?.trim() || DEFAULT_BOOK_AUTHOR;
+  // The firmware doesn't send book metadata yet (see shared/protocol/ble.md).
+  const activeTitle = lastPageText ? READING_TITLE : DEFAULT_BOOK_TITLE;
+  const activeAuthor = DEFAULT_BOOK_AUTHOR;
   const pageText = lastPageText?.trim() || 'Your latest passage will appear here as soon as the reader turns a page.';
   const voiceName = useMemo(() => formatVoiceName(settings.voice, voices), [settings.voice, voices]);
   const showMutedIndicator = muted || audioDisconnected || !isSpeaking;
@@ -320,7 +320,6 @@ export default function App() {
           <Text style={styles.bookTitle}>{activeTitle}</Text>
           <Text style={styles.bookAuthor}>
             {activeAuthor}
-            {currentPage ? ` · Page ${currentPage}` : ''}
           </Text>
         </View>
 

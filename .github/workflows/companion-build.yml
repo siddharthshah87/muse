@@ -1,5 +1,9 @@
 name: Companion iOS Build
 
+# PRs and pushes get a free typecheck + iOS bundle check. The paid EAS cloud
+# build runs only on pushes to main or a manual run, and only once EAS is set
+# up (EXPO_TOKEN secret + a real projectId in companion/app.json).
+
 on:
   push:
     branches:
@@ -11,16 +15,17 @@ on:
     paths:
       - "companion/**"
       - ".github/workflows/companion-build.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  build-ios-preview:
+  check:
     runs-on: ubuntu-latest
-    env:
-      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    defaults:
+      run:
+        working-directory: companion
 
     steps:
       - name: Check out repository
@@ -30,24 +35,66 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Cache companion dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            companion/node_modules
-            ~/.npm
-          key: ${{ runner.os }}-companion-${{ hashFiles('companion/package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-companion-
+          cache: npm
+          cache-dependency-path: companion/package-lock.json
 
       - name: Install companion dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p .
+
+      - name: Bundle iOS JavaScript
+        run: npx expo export --platform ios --output-dir dist
+        env:
+          CI: "1"
+          EXPO_OFFLINE: "1"
+
+  build-ios-preview:
+    needs: check
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    defaults:
+      run:
         working-directory: companion
-        run: npm install --no-fund --no-audit
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check EAS is configured
+        id: eas_config
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            reason="EXPO_TOKEN secret is not set"
+          elif grep -q 'YOUR_EAS_PROJECT_ID' app.json; then
+            reason="app.json still has the YOUR_EAS_PROJECT_ID placeholder (run 'npx eas-cli init' in companion/)"
+          fi
+          if [ -n "${reason:-}" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping EAS build: $reason"
+            echo "Skipped EAS build: $reason" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.eas_config.outputs.enabled == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: companion/package-lock.json
+
+      - name: Install companion dependencies
+        if: steps.eas_config.outputs.enabled == 'true'
+        run: npm ci --no-fund --no-audit
 
       - name: Start EAS preview build
+        if: steps.eas_config.outputs.enabled == 'true'
         id: eas_build
-        working-directory: companion
         run: |
           BUILD_OUTPUT=$(npx eas-cli build --profile preview --platform ios --non-interactive --json)
           printf '%s\n' "$BUILD_OUTPUT" > eas-build-output.json
@@ -73,6 +120,7 @@ jobs:
           NODE
 
       - name: Add build summary
+        if: steps.eas_config.outputs.enabled == 'true'
         run: |
           {
             echo "## Margin iOS preview build"
@@ -80,25 +128,3 @@ jobs:
             echo "- Build ID: ${{ steps.eas_build.outputs.build_id || 'unknown' }}"
             echo "- Build URL: ${{ steps.eas_build.outputs.build_url || 'not returned' }}"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Comment build URL on pull request
-        if: github.event_name == 'pull_request' && steps.eas_build.outputs.build_url != ''
-        uses: actions/github-script@v7
-        env:
-          BUILD_URL: ${{ steps.eas_build.outputs.build_url }}
-          BUILD_ID: ${{ steps.eas_build.outputs.build_id }}
-        with:
-          script: |
-            const buildUrl = process.env.BUILD_URL;
-            const buildId = process.env.BUILD_ID || 'unknown';
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: [
-                '📱 Margin iOS preview build started.',
-                '',
-                `- Build ID: ${buildId}`,
-                `- Build URL: ${buildUrl}`,
-              ].join('\n'),
-            });
