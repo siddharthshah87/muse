@@ -1,0 +1,15 @@
+# What EAS uploads for companion/ builds. Replaces .gitignore for EAS, so it
+# lists everything to leave out: only the app and the shared protocol go up.
+/*
+!/companion
+!/shared
+!/.easignore
+
+/companion/node_modules
+/companion/ios
+/companion/android
+/companion/.expo
+/companion/dist
+/companion/.env
+/companion/.env.local
+**/.DS_Store

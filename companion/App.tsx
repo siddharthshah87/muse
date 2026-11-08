@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  AppState,
   DimensionValue,
   Easing,
   LayoutChangeEvent,
@@ -13,9 +14,16 @@ import {
   Text,
   View,
 } from 'react-native';
-import * as Speech from 'expo-speech';
 import { StatusBar } from 'expo-status-bar';
-import { useMuseBle } from './src/useBle';
+import {
+  MarginVoice,
+  PersonalVoiceStatus,
+  configurePlaybackSession,
+  getPersonalVoiceStatus,
+  getVoices,
+  requestPersonalVoice,
+} from './modules/margin-voices';
+import { ReadingMode, useMuseBle } from './src/useBle';
 import { useSettings } from './src/useSettings';
 import { WaveformBar } from './src/WaveformBar';
 
@@ -39,13 +47,45 @@ const DEFAULT_BOOK_TITLE = 'Waiting for your next page';
 const DEFAULT_BOOK_AUTHOR = 'Margin companion';
 const READING_TITLE = 'Reading on your X4';
 
-function formatVoiceName(identifier: string | null, availableVoices: Speech.Voice[]) {
+const MODES: Array<{ mode: ReadingMode; label: string; hint: string }> = [
+  { mode: 'self', label: "I'll read", hint: 'Silent. Pages still arrive here; nothing is read aloud.' },
+  { mode: 'page', label: 'Read to me', hint: 'Reads each page, then waits for you to turn it.' },
+  { mode: 'continuous', label: 'Continuous', hint: 'Reads the page, turns it on the X4, and keeps going.' },
+];
+
+// Apple's novelty voices and the Eloquence voices sound robotic by design; never offer them.
+const NOVELTY_NAMES =
+  /^(albert|bad news|bahh|bells|boing|bubbles|cellos|deranged|fred|good news|hysterical|jester|junior|kathy|organ|pipe organ|ralph|superstar|trinoids|whisper|wobble|zarvox|grandma|grandpa|eddy|flo|reed|rocko|sandy|shelley)\b/i;
+
+const QUALITY_RANK = { premium: 1, enhanced: 2, default: 3 } as const;
+const QUALITY_LABEL = { premium: 'Premium', enhanced: 'Enhanced', default: 'Standard' } as const;
+
+function narrationVoices(all: MarginVoice[]) {
+  return all
+    .filter(
+      (v) =>
+        v.language.toLowerCase().startsWith('en') &&
+        !v.isNoveltyVoice &&
+        !NOVELTY_NAMES.test(v.name) &&
+        !/speech\.synthesis\.voice|eloquence/i.test(v.identifier),
+    )
+    .sort((a, b) => {
+      const rank = (v: MarginVoice) => (v.isPersonalVoice ? 0 : QUALITY_RANK[v.quality]);
+      return rank(a) - rank(b) || a.name.localeCompare(b.name);
+    });
+}
+
+function voiceTag(voice: MarginVoice) {
+  return voice.isPersonalVoice ? 'Personal Voice' : QUALITY_LABEL[voice.quality];
+}
+
+function formatVoiceName(identifier: string | null, availableVoices: MarginVoice[]) {
   if (!identifier) {
     return 'System voice';
   }
 
   const match = availableVoices.find((voice) => voice.identifier === identifier);
-  return match?.name ?? identifier;
+  return match ? `${match.name} · ${voiceTag(match)}` : identifier;
 }
 
 function clampRate(value: number) {
@@ -178,44 +218,92 @@ function CalmDot() {
 }
 
 export default function App() {
-  const { settings, isHydrated, setAutoConnect, setRate, setVoice } = useSettings();
+  const { settings, isHydrated, setAutoConnect, setRate, setVoice, setMode } = useSettings();
   const [screen, setScreen] = useState<ScreenState>('pairing');
   const [settingsVisible, setSettingsVisible] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [voices, setVoices] = useState<Speech.Voice[]>([]);
+  const [voices, setVoices] = useState<MarginVoice[]>([]);
+  const [personalVoiceStatus, setPersonalVoiceStatus] = useState<PersonalVoiceStatus>('unsupported');
   const openedReadingOnce = useRef(false);
 
   useEffect(() => {
-    let active = true;
+    // Spoken-audio playback: narration keeps going with the screen locked and ignores the mute switch.
+    configurePlaybackSession();
+  }, []);
 
-    Speech.getAvailableVoicesAsync()
-      .then((availableVoices) => {
-        if (active) {
-          setVoices(availableVoices);
-        }
-      })
-      .catch(() => undefined);
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      getVoices()
+        .then((available) => {
+          if (active) {
+            setVoices(narrationVoices(available));
+          }
+        })
+        .catch(() => undefined);
+      setPersonalVoiceStatus(getPersonalVoiceStatus());
+    };
+
+    refresh();
+    // Voices downloaded in iOS Settings show up when the user comes back to the app.
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        refresh();
+      }
+    });
 
     return () => {
       active = false;
+      subscription.remove();
     };
   }, []);
+
+  // A saved voice that was deleted in iOS Settings would make every utterance fail silently.
+  useEffect(() => {
+    if (settings.voice && voices.length && !voices.some((v) => v.identifier === settings.voice)) {
+      setVoice(null);
+    }
+  }, [setVoice, settings.voice, voices]);
+
+  const handlePersonalVoice = async () => {
+    const result = await requestPersonalVoice();
+    setPersonalVoiceStatus(result);
+    if (result === 'authorized') {
+      const available = narrationVoices(await getVoices());
+      setVoices(available);
+      const personal = available.find((v) => v.isPersonalVoice);
+      if (personal) {
+        setVoice(personal.identifier);
+      }
+    }
+  };
 
   const {
     status,
     deviceName,
     lastPageText,
     isSpeaking,
+    isPaused,
+    isTurningPage,
+    supportsContinuous,
     audioDisconnected,
     connect,
     disconnect,
     replayLastPage,
+    togglePause,
   } = useMuseBle({
     voice: settings.voice,
     rate: settings.rate,
-    muted,
+    mode: settings.mode,
     autoConnect: isHydrated && settings.autoConnect,
   });
+
+  // Older X4 firmware can't turn pages on request; fall back to reading page by page.
+  const continuousBlocked = status === 'connected' && !supportsContinuous;
+  useEffect(() => {
+    if (continuousBlocked && settings.mode === 'continuous') {
+      setMode('page');
+    }
+  }, [continuousBlocked, setMode, settings.mode]);
 
   useEffect(() => {
     if (screen === 'reading' && (audioDisconnected || (status === 'disconnected' && !!lastPageText))) {
@@ -237,7 +325,22 @@ export default function App() {
   const activeAuthor = DEFAULT_BOOK_AUTHOR;
   const pageText = lastPageText?.trim() || 'Your latest passage will appear here as soon as the reader turns a page.';
   const voiceName = useMemo(() => formatVoiceName(settings.voice, voices), [settings.voice, voices]);
-  const showMutedIndicator = muted || audioDisconnected || !isSpeaking;
+  const silent = settings.mode === 'self';
+  const showWaveform = !silent && !isPaused && !audioDisconnected && isSpeaking;
+  const modeHint =
+    MODES.find((m) => m.mode === settings.mode)!.hint +
+    (continuousBlocked ? ' Continuous needs newer X4 firmware.' : '');
+  const narrationStatus = audioDisconnected
+    ? 'Output paused until audio reconnects'
+    : isTurningPage
+      ? 'Turning the page…'
+      : isPaused
+        ? 'Paused'
+        : silent
+          ? 'Silent: you are reading'
+          : isSpeaking
+            ? ''
+            : 'Waiting for the next page';
   const isBusy = status === 'scanning' || status === 'connecting';
 
   const openReading = () => {
@@ -245,12 +348,7 @@ export default function App() {
     setScreen(audioDisconnected ? 'reconnecting' : 'reading');
   };
 
-  const handleNarrationToggle = () => {
-    setMuted((current) => !current);
-  };
-
   const handleDisconnect = () => {
-    setMuted(false);
     openedReadingOnce.current = false;
     setScreen('pairing');
     disconnect();
@@ -323,23 +421,47 @@ export default function App() {
           </Text>
         </View>
 
+        <View>
+          <View style={styles.modeSwitch} accessibilityRole="radiogroup">
+            {MODES.map(({ mode, label }) => {
+              const selected = settings.mode === mode;
+              const disabled = mode === 'continuous' && continuousBlocked;
+              return (
+                <Pressable
+                  key={mode}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected, disabled }}
+                  disabled={disabled}
+                  onPress={() => setMode(mode)}
+                  style={[styles.modeOption, selected && styles.modeOptionSelected, disabled && styles.modeOptionDisabled]}
+                >
+                  <Text style={[styles.modeLabel, selected && styles.modeLabelSelected]}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Text style={styles.modeHint}>{modeHint}</Text>
+        </View>
+
         <View style={styles.pageCard}>
           <Text style={styles.pageText}>{pageText}</Text>
         </View>
 
         <View style={styles.centerControls}>
-          <Pressable style={[styles.playButton, muted && styles.playButtonMuted]} onPress={handleNarrationToggle}>
-            <Text style={[styles.playButtonIcon, muted && styles.playButtonMutedText]}>{muted ? '▷' : 'Ⅱ'}</Text>
-            <Text style={[styles.playButtonLabel, muted && styles.playButtonMutedText]}>
-              {muted ? 'Resume narration' : 'Mute narration'}
-            </Text>
-          </Pressable>
+          {!silent ? (
+            <Pressable style={[styles.playButton, isPaused && styles.playButtonMuted]} onPress={togglePause}>
+              <Text style={[styles.playButtonIcon, isPaused && styles.playButtonMutedText]}>{isPaused ? '▷' : 'Ⅱ'}</Text>
+              <Text style={[styles.playButtonLabel, isPaused && styles.playButtonMutedText]}>
+                {isPaused ? 'Resume' : 'Pause'}
+              </Text>
+            </Pressable>
+          ) : null}
 
           <View style={styles.signalBlock}>
-            {!showMutedIndicator ? (
+            {showWaveform ? (
               <WaveformBar color={COLORS.amber} />
             ) : (
-              <Text style={styles.mutedText}>{audioDisconnected ? 'Output paused until audio reconnects' : 'Muted'}</Text>
+              <Text style={styles.mutedText}>{narrationStatus}</Text>
             )}
           </View>
         </View>
@@ -381,7 +503,7 @@ export default function App() {
         </View>
         <Text style={styles.heroTitle}>Holding your place</Text>
         <Text style={styles.heroSubtitle}>
-          {audioDisconnected ? 'AirPods Pro disconnected' : 'Reconnecting to your reader'}
+          {audioDisconnected ? 'Audio was interrupted' : 'Reconnecting to your reader'}
         </Text>
       </View>
     </SafeAreaView>
@@ -404,7 +526,30 @@ export default function App() {
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={styles.settingGroup}>
                 <Text style={styles.settingLabel}>Voice</Text>
-                <Text style={styles.settingHint}>System voices available on this device</Text>
+                <Text style={styles.settingHint}>
+                  For the most natural voices, download a Premium voice in iOS Settings › Accessibility › Spoken
+                  Content › Voices › English. It appears here when you come back.
+                </Text>
+                {personalVoiceStatus === 'notDetermined' ? (
+                  <Pressable style={styles.secondaryButton} onPress={handlePersonalVoice}>
+                    <Text style={styles.secondaryButtonText}>Use my Personal Voice</Text>
+                  </Pressable>
+                ) : personalVoiceStatus === 'denied' ? (
+                  <Text style={styles.emptyText}>
+                    Personal Voice is off for Margin. Turn on Settings › Accessibility › Personal Voice › Allow Apps to
+                    Request to Use, then try again.
+                  </Text>
+                ) : null}
+                <Pressable
+                  style={[styles.voiceOption, settings.voice === null && styles.voiceOptionSelected]}
+                  onPress={() => setVoice(null)}
+                >
+                  <View>
+                    <Text style={styles.voiceName}>System voice</Text>
+                    <Text style={styles.voiceLocale}>Your Spoken Content default</Text>
+                  </View>
+                  {settings.voice === null ? <Text style={styles.voiceSelected}>Selected</Text> : null}
+                </Pressable>
                 {voices.length ? (
                   voices.map((voice) => {
                     const selected = settings.voice === voice.identifier;
@@ -416,7 +561,9 @@ export default function App() {
                       >
                         <View>
                           <Text style={styles.voiceName}>{voice.name}</Text>
-                          <Text style={styles.voiceLocale}>{voice.language}</Text>
+                          <Text style={styles.voiceLocale}>
+                            {voiceTag(voice)} · {voice.language}
+                          </Text>
                         </View>
                         {selected ? <Text style={styles.voiceSelected}>Selected</Text> : null}
                       </Pressable>
@@ -629,6 +776,43 @@ const styles = StyleSheet.create({
   bookAuthor: {
     color: COLORS.textSoft,
     fontSize: 16,
+  },
+  modeSwitch: {
+    flexDirection: 'row',
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 4,
+    gap: 4,
+  },
+  modeOption: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  modeOptionSelected: {
+    backgroundColor: 'rgba(208,152,63,0.18)',
+  },
+  modeOptionDisabled: {
+    opacity: 0.35,
+  },
+  modeLabel: {
+    color: COLORS.textSoft,
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  modeLabelSelected: {
+    color: COLORS.amber,
+    fontWeight: '700',
+  },
+  modeHint: {
+    color: COLORS.textMuted,
+    fontSize: 14,
+    marginTop: 8,
   },
   pageCard: {
     backgroundColor: COLORS.cardWarm,
