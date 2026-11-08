@@ -11,7 +11,7 @@ npm ci
 # 2. Log in to your Expo account (create one free at expo.dev if needed)
 eas login
 
-# 3. Register project (fills YOUR_EAS_PROJECT_ID in app.json automatically).
+# 3. Register project (writes extra.eas.projectId into app.json).
 #    Commit the updated app.json so CI can build too.
 eas init
 

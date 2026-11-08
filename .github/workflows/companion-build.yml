@@ -69,8 +69,8 @@ jobs:
         run: |
           if [ -z "$EXPO_TOKEN" ]; then
             reason="EXPO_TOKEN secret is not set"
-          elif grep -q 'YOUR_EAS_PROJECT_ID' app.json; then
-            reason="app.json still has the YOUR_EAS_PROJECT_ID placeholder (run 'npx eas-cli init' in companion/)"
+          elif ! grep -q '"projectId"' app.json; then
+            reason="app.json has no EAS projectId yet (run 'npx eas-cli init' in companion/ and commit app.json)"
           fi
           if [ -n "${reason:-}" ]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"

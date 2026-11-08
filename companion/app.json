@@ -5,22 +5,28 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "scheme": "margin",
-    "platforms": ["ios"],
+    "platforms": [
+      "ios"
+    ],
     "ios": {
       "bundleIdentifier": "com.siddharthshah87.margin",
       "supportsTablet": false,
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Margin uses Bluetooth to connect to your e-reader and receive page text for narration.",
         "NSBluetoothPeripheralUsageDescription": "Margin uses Bluetooth to connect to your e-reader and receive page text for narration.",
-        "UIBackgroundModes": ["bluetooth-central", "audio", "fetch"],
+        "UIBackgroundModes": [
+          "bluetooth-central",
+          "audio",
+          "fetch"
+        ],
         "AVAudioSessionCategory": "AVAudioSessionCategoryPlayback"
       }
     },
     "extra": {
       "eas": {
-        "projectId": "YOUR_EAS_PROJECT_ID"
-      },
-      "easProjectIdNote": "TODO: replace YOUR_EAS_PROJECT_ID after running 'eas init' in companion/."
-    }
+        "projectId": "6e439c5c-59fe-4470-99aa-12cc23953e8d"
+      }
+    },
+    "owner": "siddharthshah87"
   }
 }
