@@ -8,7 +8,9 @@ reassembly as companion/src/pageAssembler.ts). Nothing leaves the machine.
 Modes:
   page        read each page, then wait for you to turn it (default)
   continuous  read the page to the end, turn it on the X4, keep going (needs
-              X4 firmware with the control characteristic)
+              X4 firmware with the control characteristic). With firmware that
+              answers PEEK_NEXT, the next page is prepared while the current
+              one is read, so the turn and the next page start together.
 
 Dialogue gets per-character voices (male/female guessed from the text; see
 tools/dialogue_voices.py); --no-dialogue-voices turns that off.
@@ -43,6 +45,8 @@ SERVICE = "4d555345-0001-1000-8000-000000000000"
 PAGE_CHAR = "4d555345-0002-1000-8000-000000000000"
 CONTROL_CHAR = "4d555345-0004-1000-8000-000000000000"
 NEXT_PAGE = bytes([0x01])
+PEEK_NEXT = bytes([0x02])
+PREVIEW_FLAG = 0x80  # set on seq for next-page previews (shared/protocol/ble.md)
 NEXT_PAGE_WAIT_S = 15
 
 MODEL_DIR = pathlib.Path.home() / ".cache" / "margin" / "kokoro"
@@ -52,8 +56,6 @@ FAST_MODEL = "kokoro-v1.0.int8.onnx"  # ~4x smaller, faster on CPU, slightly low
 
 # --- Text: same rules as companion/src/narration.ts ------------------------
 SENTENCE = re.compile(r"[^.!?…]+(?:[.!?…]+[\"'”’)\]]*|$)\s*")
-ENDS_SENTENCE = re.compile(r"[.!?…][\"'”’)\]]*\s*$")
-SENTENCE_BREAK = re.compile(r"[.!?…][\"'”’)\]]*\s")
 
 
 # The X4 hyphenates at line ends and the page text keeps the split ("be- hind").
@@ -89,36 +91,6 @@ def quick_start(pieces: list[str], first_max: int = 90) -> list[str]:
     if cut < 0:
         return pieces
     return [head[: cut + 1].strip(), head[cut + 1 :].strip()] + pieces[1:]
-
-
-def split_trailing_fragment(text: str) -> tuple[str, str]:
-    clean = re.sub(r"\s+", " ", text).strip()
-    if not clean or ENDS_SENTENCE.search(clean):
-        return clean, ""
-    cuts = [m.end() for m in SENTENCE_BREAK.finditer(clean)]
-    if not cuts:
-        return clean, ""
-    return clean[: cuts[-1]].strip(), clean[cuts[-1]:].strip()
-
-
-class PageBreakJoiner:
-    MAX_CARRY = 600
-
-    def __init__(self) -> None:
-        self.carry = ""
-
-    def take_carry(self) -> str:
-        carry, self.carry = self.carry, ""
-        return carry
-
-    def next(self, page: str, continues_previous: bool) -> str:
-        joined = (f"{self.carry} {page}" if continues_previous and self.carry else page).strip()
-        complete, remainder = split_trailing_fragment(joined)
-        if len(remainder) > self.MAX_CARRY or not complete:
-            self.carry = ""
-            return joined
-        self.carry = remainder
-        return complete
 
 
 class PageAssembler:
@@ -163,8 +135,26 @@ def ensure_model(model: str) -> None:
         tmp.rename(path)
 
 
+class Prepared:
+    """A page's audio, synthesized sentence by sentence on a background thread."""
+
+    def __init__(self, text: str, pieces: list[tuple[str, str]]) -> None:
+        self.text = text
+        self.pieces = pieces
+        self.ready: queue.Queue = queue.Queue()
+        self.cancelled = False
+        self.synth_done = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
 class Speaker:
-    """Kokoro synthesis a sentence at a time, streamed to paplay. speak() interrupts."""
+    """Kokoro synthesis a sentence at a time, streamed to paplay.
+
+    prepare() starts synthesizing a page without playing it (the next page, while the
+    current one plays); play() plays a prepared page and interrupts whatever was playing.
+    """
 
     def __init__(self, voice: str, speed: float, pause: float, dialogue: bool = True,
                  model: str = FAST_MODEL, threads: int = 3) -> None:
@@ -187,6 +177,39 @@ class Speaker:
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
 
+    def _pieces(self, text: str) -> list[tuple[str, str]]:
+        if self.cast:
+            pieces = [(p, v) for seg, v in assign_voices(text, self.cast) for p in split_for_speech(seg)]
+        else:
+            pieces = [(p, self.voice) for p in split_for_speech(text)]
+        if pieces:  # shorten only the opening piece so speech starts sooner
+            head = quick_start([pieces[0][0]])
+            pieces = [(h, pieces[0][1]) for h in head] + pieces[1:]
+        return pieces
+
+    def prepare(self, text: str, after: Prepared | None = None) -> Prepared:
+        """Start synthesizing text. With `after`, wait until that page is fully synthesized
+        first, so the page being heard never competes with the one being prepared."""
+        import numpy as np
+
+        prep = Prepared(text, self._pieces(text))
+
+        def produce() -> None:
+            try:
+                if after is not None:
+                    after.synth_done.wait()
+                for piece, voice in prep.pieces:
+                    if prep.cancelled:
+                        break
+                    samples, _ = self.kokoro.create(piece, voice=voice, speed=self.speed, lang="en-us")
+                    prep.ready.put((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+            finally:
+                prep.ready.put(None)
+                prep.synth_done.set()
+
+        threading.Thread(target=produce, daemon=True).start()
+        return prep
+
     def stop(self) -> int:
         with self.lock:
             self.gen += 1
@@ -195,20 +218,14 @@ class Speaker:
             self.proc = None
             return self.gen
 
-    def speak(self, text: str, on_done=None) -> None:
+    def play(self, prep: Prepared, on_done=None) -> None:
         gen = self.stop()
-        threading.Thread(target=self._run, args=(gen, text, on_done), daemon=True).start()
+        threading.Thread(target=self._play, args=(gen, prep, on_done), daemon=True).start()
 
-    def _run(self, gen: int, text: str, on_done) -> None:
-        import numpy as np
+    def speak(self, text: str, on_done=None) -> None:
+        self.play(self.prepare(text), on_done)
 
-        if self.cast:
-            pieces = [(p, v) for seg, v in assign_voices(text, self.cast) for p in split_for_speech(seg)]
-        else:
-            pieces = [(p, self.voice) for p in split_for_speech(text)]
-        if pieces:  # shorten only the opening piece so speech starts sooner
-            head = quick_start([pieces[0][0]])
-            pieces = [(h, pieces[0][1]) for h in head] + pieces[1:]
+    def _play(self, gen: int, prep: Prepared, on_done) -> None:
         proc = subprocess.Popen(
             ["paplay", "--raw", f"--rate={self.rate}", "--format=s16le", "--channels=1"],
             stdin=subprocess.PIPE,
@@ -219,31 +236,20 @@ class Speaker:
                 return
             self.proc = proc
         gap = b"\x00\x00" * int(self.rate * self.pause)
-        # Synthesize ahead on its own thread (Kokoro runs faster than real time here), so
-        # playback never waits for the next sentence; this thread only feeds paplay.
-        ready: queue.Queue = queue.Queue()
-
-        def produce() -> None:
-            for piece, voice in pieces:
-                if gen != self.gen:
-                    break
-                samples, _ = self.kokoro.create(piece, voice=voice, speed=self.speed, lang="en-us")
-                ready.put((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
-            ready.put(None)
-
-        threading.Thread(target=produce, daemon=True).start()
         try:
             while True:
-                pcm = ready.get()
+                pcm = prep.ready.get()
                 if pcm is None or gen != self.gen:
                     break
                 proc.stdin.write(pcm + gap)
                 proc.stdin.flush()
             if gen != self.gen:
+                prep.cancel()
                 return
             proc.stdin.close()
             proc.wait()  # returns when the last sample has played
         except (BrokenPipeError, ValueError, OSError):
+            prep.cancel()
             return  # interrupted by a newer page
         if gen == self.gen and on_done:
             on_done()
@@ -275,75 +281,134 @@ async def session(args, speaker: Speaker | None) -> None:
             timeout=10,
         )
     loop = asyncio.get_running_loop()
-    assembler, joiner = PageAssembler(), PageBreakJoiner()
-    state = {"awaiting": False, "pages": 0, "wait": None, "asked_at": 0.0}
+    pages_asm, preview_asm = PageAssembler(), PageAssembler()
+    state = {
+        "pages": 0, "wait": None, "asked_at": 0.0,
+        "current": None,        # Prepared page being heard
+        "next": None,           # Prepared preview of the following page
+        "confirm": None,        # text we already started at the turn; the real page should match it
+        "peek_ok": None,        # None = unknown, True/False once we know if the firmware answers PEEK_NEXT
+        "peek_timer": None,
+    }
 
     async with BleakClient(dev) as client:
         chars = {c.uuid.lower() for s in client.services for c in s.characteristics}
-        can_turn = CONTROL_CHAR in chars
         mode = args.mode
-        if mode == "continuous" and not can_turn:
+        if mode == "continuous" and CONTROL_CHAR not in chars:
             print("This X4 firmware can't turn pages on request; reading page by page.", flush=True)
             mode = "page"
         print(f"Connected to {dev.address}. Mode: {mode}. Turn a page on the X4.", flush=True)
 
-        def cancel_wait():
-            if state["wait"]:
-                state["wait"].cancel()
-                state["wait"] = None
+        def cancel_timer(key):
+            if state[key]:
+                state[key].cancel()
+                state[key] = None
 
-        async def request_next():
+        async def write(cmd: bytes, what: str) -> None:
+            try:
+                await client.write_gatt_char(CONTROL_CHAR, cmd, response=False)
+            except Exception as e:  # noqa: BLE001 — report and keep listening
+                print(f"  ! {what} request failed: {e}", flush=True)
+
+        async def request_peek():
+            if mode != "continuous" or state["peek_ok"] is False or not client.is_connected:
+                return
+
+            def no_preview():
+                state["peek_timer"] = None
+                if state["peek_ok"] is None:
+                    state["peek_ok"] = False
+                    print("  (this X4 firmware has no page previews; turning first, then reading)", flush=True)
+
+            if state["peek_ok"] is None and state["peek_timer"] is None:
+                state["peek_timer"] = loop.call_later(2.5, no_preview)  # first unanswered request decides
+            await write(PEEK_NEXT, "preview")
+
+        async def request_turn():
             if not client.is_connected:
                 return
-            cancel_wait()
-            state["awaiting"] = True
+            cancel_timer("wait")
             state["asked_at"] = time.monotonic()
-            print("  → turning the page", flush=True)
 
             def no_page():
-                state["awaiting"] = False
-                carry = joiner.take_carry()
+                state["wait"] = None
+                state["confirm"] = None
                 print("  (no new page: end of book, or the X4 is busy)", flush=True)
-                if carry and speaker:
-                    speaker.speak(carry)
 
             state["wait"] = loop.call_later(NEXT_PAGE_WAIT_S, no_page)
-            try:
-                await client.write_gatt_char(CONTROL_CHAR, NEXT_PAGE, response=False)
-            except Exception as e:  # noqa: BLE001 — report and keep listening
-                print(f"  ! page-turn request failed: {e}", flush=True)
+            await write(NEXT_PAGE, "page-turn")
 
-        def after_page():  # called from the speech thread
-            if mode == "continuous":
-                asyncio.run_coroutine_threadsafe(request_next(), loop)
+        def after_page():  # called from the speech thread when a page has been read to the end
+            if mode != "continuous":
+                return
+
+            def advance():
+                nxt = state["next"]
+                state["next"] = None
+                if nxt is not None:
+                    # Gapless: turn and start the prepared next page together.
+                    print("  → turning the page (next page already prepared)", flush=True)
+                    state["current"], state["confirm"] = nxt, nxt.text
+                    speaker.play(nxt, after_page)
+                else:
+                    print("  → turning the page", flush=True)
+                asyncio.ensure_future(request_turn())
+
+            loop.call_soon_threadsafe(advance)
 
         def on_page(text: str) -> None:
+            cancel_timer("wait")
+            if state["asked_at"]:
+                print(f"  (X4 turned and sent the page {time.monotonic() - state['asked_at']:.1f}s after the request)", flush=True)
+                state["asked_at"] = 0.0
+            if state["confirm"] is not None and text == state["confirm"]:
+                state["confirm"] = None  # already being read since the turn
+                asyncio.ensure_future(request_peek())
+                return
+            state["confirm"] = None
             if not text.strip():
                 print("  (page without text)", flush=True)
                 if mode == "continuous":
-                    loop.call_later(0.4, lambda: asyncio.ensure_future(request_next()))
+                    loop.call_later(0.4, lambda: asyncio.ensure_future(request_turn()))
                 return
-            continues = state["awaiting"]
-            state["awaiting"] = False
-            cancel_wait()
             state["pages"] += 1
             print(f"\n— page {state['pages']} —\n{text}\n", flush=True)
-            if state["asked_at"]:
-                print(f"  (page arrived {time.monotonic() - state['asked_at']:.1f}s after the turn request)", flush=True)
-                state["asked_at"] = 0.0
+            if state["next"] is not None:  # the reader moved somewhere else: drop the stale preview
+                state["next"].cancel()
+                state["next"] = None
             if speaker:
-                # Read to the end of the page, then turn: the X4 never shows a page ahead of the voice.
-                speaker.speak(text, after_page if mode == "continuous" else None)
+                state["current"] = speaker.prepare(text)
+                speaker.play(state["current"], after_page if mode == "continuous" else None)
+            asyncio.ensure_future(request_peek())
+
+        def on_preview(text: str) -> None:
+            cancel_timer("peek_timer")
+            state["peek_ok"] = True
+            if state["next"] is not None:
+                state["next"].cancel()
+            if text.strip() and speaker:
+                state["next"] = speaker.prepare(text, after=state["current"])
+            else:
+                state["next"] = None  # next page not laid out yet, or has no text: turn first
 
         def on_notify(_, data: bytearray) -> None:
-            text = assembler.push(bytes(data))
+            raw = bytes(data)
+            if raw and raw[0] & PREVIEW_FLAG:
+                text = preview_asm.push(bytes([raw[0] & ~PREVIEW_FLAG & 0xFF]) + raw[1:])
+                if text is not None:
+                    on_preview(text)
+                return
+            text = pages_asm.push(raw)
             if text is not None:
                 on_page(text)
 
         await client.start_notify(PAGE_CHAR, on_notify)
         while client.is_connected:
             await asyncio.sleep(0.5)
-        cancel_wait()
+        cancel_timer("wait")
+        cancel_timer("peek_timer")
+        if state["next"] is not None:
+            state["next"].cancel()
     print("Disconnected (the X4 went to sleep or left the book).", flush=True)
 
 
