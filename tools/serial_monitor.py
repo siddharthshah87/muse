@@ -6,6 +6,7 @@ USB-Serial/JTAG doesn't reset via plain DTR/RTS), then captures serial output.
 
 Usage:
     python tools/serial_monitor.py [--seconds 15] [--baud 115200] [--no-reset]
+    python tools/serial_monitor.py --no-reset --send CMD:TRACE --seconds 3
 """
 from __future__ import annotations
 
@@ -35,6 +36,9 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=15.0)
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--no-reset", action="store_true", help="Just read; do not reset first.")
+    ap.add_argument("--send", action="append", default=[], metavar="LINE",
+                    help="Serial command to send after opening, e.g. CMD:TRACE "
+                         "(dumps the Muse trace ring). Repeatable.")
     args = ap.parse_args()
 
     import serial  # from pyserial (esptool dep)
@@ -68,6 +72,10 @@ def main() -> int:
     if not s:
         print("Could not open serial after reset.", file=sys.stderr)
         return 1
+
+    for line in args.send:
+        s.write((line + "\n").encode("utf-8"))
+    s.flush()
 
     print(f"=== boot log ({port} @ {args.baud}, {args.seconds:.0f}s) ===")
     end = time.time() + args.seconds

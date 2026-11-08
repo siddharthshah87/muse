@@ -16,6 +16,14 @@
 static constexpr size_t  CHUNK_PAYLOAD = 180;
 static constexpr size_t  MAX_TEXT      = 4096;
 
+static void emitTraceLine(const char* line) { logSerial.println(line); }
+
+// Largest n <= len that does not split a UTF-8 sequence.
+static size_t utf8Boundary(const char* text, size_t len) {
+    while (len > 0 && (static_cast<uint8_t>(text[len]) & 0xC0) == 0x80) --len;
+    return len;
+}
+
 static bool                    _startRequested  = false;
 static bool                    _initialized     = false;
 static bool                    _clientConnected = false;
@@ -84,7 +92,7 @@ void MuseBleServer::notifyPageText(const char* text, size_t len) {
     static uint8_t _flushCounter = 0;
     if (++_flushCounter >= 8) {
         _flushCounter = 0;
-        muse_trace_flush();
+        muse_trace_flush(emitTraceLine);
     }
 
     muse_trace_log("PAGE", "notify init=%d conn=%d len=%u",
@@ -93,7 +101,7 @@ void MuseBleServer::notifyPageText(const char* text, size_t len) {
             (int)_initialized, (int)_clientConnected, (unsigned)len);
     if (!_initialized || !_clientConnected || !_pageTextChar || len == 0) return;
 
-    len = std::min(len, MAX_TEXT);
+    if (len > MAX_TEXT) len = utf8Boundary(text, MAX_TEXT);
     const uint8_t totalChunks =
         static_cast<uint8_t>((len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD);
 

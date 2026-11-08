@@ -38,7 +38,4 @@ DerivedData/
 Thumbs.db
 *.swp
 .vscode/*.log
-firmware-x4/src/device_protocol/barectf*.c
-firmware-x4/src/device_protocol/barectf*.h
-firmware-x4/src/device_protocol/MuseTrace.*
 .venv-tracing/
