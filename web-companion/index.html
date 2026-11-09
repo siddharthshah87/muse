@@ -274,8 +274,8 @@ function loadVoices() {
   if (all.length && all.length !== voicesLogged) {
     voicesLogged = all.length;
     const en = all.filter((v) => (v.lang || "").toLowerCase().startsWith("en"));
-    log(`browser offers ${all.length} voices (${en.length} English):\n  ` +
-        en.map((v) => `${v.name} | ${v.lang} | ${v.voiceURI}${v.default ? " | default" : ""}`).join("\n  "));
+    const better = en.filter((v) => /premium|enhanced/i.test(v.voiceURI || ""));
+    log(`iPhone voices: ${all.length} (${en.length} English, ${better.length} Premium/Enhanced)`);
   }
   voices = all.filter((v) =>
     v.lang && v.lang.toLowerCase().startsWith("en") &&
@@ -436,6 +436,7 @@ function kittenLoad(choice) {
   if (kitten.worker) kitten.worker.terminate();
   Object.assign(kitten, { ready: false, model: choice, jobs: new Map(), playing: null, cast: null });
   ui.kittenStatus.textContent = "Loading the neural voice… the iPhone voice reads until it is ready.";
+  log(`loading Kitten ${choice}…`);
   const w = new Worker("./kitten-worker.js", { type: "module" });
   kitten.worker = w;
   w.onerror = (e) => {
@@ -795,6 +796,7 @@ ui.voice.addEventListener("change", () => {
 ui.engine.addEventListener("change", () => {
   engine = ui.engine.value;
   store.set("engine", engine);
+  log("voice engine: " + (engine === "system" ? "iPhone voice" : `Kitten (${engine.replace("kitten-", "")})`));
   renderVoiceSettings();
   if (engine !== "system") {
     kittenLoad(engine);
@@ -812,6 +814,7 @@ ui.kittenVoice.value = store.get("kittenVoice", "Bella");
 characters = store.get("characters", "1") === "1";
 ui.characters.checked = characters;
 renderVoiceSettings();
+log("voice engine: " + (engine === "system" ? "iPhone voice" : `Kitten (${engine.replace("kitten-", "")})`));
 if (engine !== "system") kittenLoad(engine);
 ui.rate.value = store.get("rate", "0.9");
 ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×";
