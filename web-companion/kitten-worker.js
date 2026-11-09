@@ -28,6 +28,21 @@ const queue = [];          // pending jobs
 const cancelled = new Set();
 let running = false;
 
+// Large model files are kept in Cache Storage so later visits don't download them again.
+const CACHE = "margin-voices-v1";
+async function cachedFetch(url) {
+  try {
+    const cache = await caches.open(CACHE);
+    const hit = await cache.match(url);
+    if (hit) return { response: hit, cached: true };
+    const response = await fetch(url);
+    if (response.ok) await cache.put(url, response.clone());
+    return { response, cached: false };
+  } catch {
+    return { response: await fetch(url), cached: false };
+  }
+}
+
 async function phonemesKeepingPunctuation(text) {
   let out = "";
   for (const part of text.split(PUNCT)) {
@@ -83,12 +98,17 @@ self.onmessage = async ({ data }) => {
   if (data.type === "load") {
     const t0 = performance.now();
     try {
-      const base = `./models/kitten/${data.model}/`;
+      const base = new URL(`./models/kitten/${data.model}/`, self.location.href).href;
       meta = await (await fetch(base + "voices.json")).json();
-      voices = new Float32Array(await (await fetch(base + "voices.bin")).arrayBuffer());
-      session = await ort.InferenceSession.create(base + "model.onnx", { executionProviders: ["wasm"] });
+      const voicesFile = await cachedFetch(base + "voices.bin");
+      voices = new Float32Array(await voicesFile.response.arrayBuffer());
+      const modelFile = await cachedFetch(base + "model.onnx");
+      const model = new Uint8Array(await modelFile.response.arrayBuffer());
+      const tDownload = (performance.now() - t0) / 1000;
+      session = await ort.InferenceSession.create(model, { executionProviders: ["wasm"] });
       await phonemesKeepingPunctuation("Warm up."); // loads eSpeak
-      self.postMessage({ type: "loaded", secs: (performance.now() - t0) / 1000, threads: ort.env.wasm.numThreads });
+      self.postMessage({ type: "loaded", secs: (performance.now() - t0) / 1000, threads: ort.env.wasm.numThreads,
+                         cached: modelFile.cached && voicesFile.cached, fetchSecs: tDownload });
     } catch (e) {
       self.postMessage({ type: "error", where: "load", message: String(e && (e.stack || e.message) || e) });
     }

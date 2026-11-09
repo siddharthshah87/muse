@@ -261,6 +261,7 @@ for (const b of ui.modeButtons) b.addEventListener("click", () => setMode(b.data
 const synth = window.speechSynthesis;
 let voices = [];
 let lastText = "";
+let pageFinished = false; // the page on screen has been read to the end
 let speakToken = 0;   // bumps on every new page / stop; stale utterance events are ignored
 let speaking = false;
 
@@ -357,7 +358,8 @@ function makeUtterance(text) {
 
 // Speaks one page; onDone runs only if the page was read to the end. `prepared` is a page
 // whose Kitten audio was generated in advance (gapless continuous reading).
-function speakPage(text, onDone, prepared) {
+function speakPage(text, onDoneCallback, prepared) {
+  const onDone = () => { pageFinished = true; onDoneCallback && onDoneCallback(); };
   stopSpeech(); // a new page interrupts the old one
   if (mode === "self" || paused) { if (prepared) kittenDiscard(prepared.job); return; }
   if (kittenActive()) {
@@ -448,7 +450,9 @@ function kittenLoad(choice) {
     if (data.type === "loaded") {
       kitten.ready = true;
       ui.kittenStatus.textContent = `Neural voice ready (${data.threads} thread${data.threads > 1 ? "s" : ""}).`;
-      log(`Kitten ${choice} loaded in ${data.secs.toFixed(1)} s, ${data.threads} threads`);
+      log(`Kitten ${choice} loaded in ${data.secs.toFixed(1)} s (${data.cached ? "from this phone's cache" : "downloaded"}: ` +
+          `${data.fetchSecs.toFixed(1)} s), ${data.threads} threads`);
+      readCurrentPageIfIdle();
       return;
     }
     if (data.type === "error" && data.where === "load") {
@@ -550,6 +554,17 @@ function kittenPlay(job, token, onDone) {
   finishIfDone(); // already finished and empty
 }
 
+// The page on screen, not yet read to the end, when the neural voice becomes ready or the engine
+// changes: (re)start it in the new voice instead of waiting for the next page turn. It may already
+// be partly read by the iPhone voice (or stuck, if iOS refused to speak before a tap).
+function readCurrentPageIfIdle() {
+  if (!lastText || pageFinished || paused || mode === "self" || !(device && device.gatt.connected)) return;
+  log("reading the current page" + (speaking ? " again in the new voice" : ""));
+  resetPreviews();
+  speakPage(cleanForSpeech(lastText), afterPage);
+  requestPeek();
+}
+
 function renderVoiceSettings() {
   const neural = engine !== "system";
   ui.kittenRow.hidden = !neural;
@@ -603,6 +618,7 @@ function onPreview(text) {
 function showPage(text) {
   pages++;
   lastText = text;
+  pageFinished = false;
   ui.page.textContent = text;
   ui.page.classList.remove("empty");
   ui.pageLabel.textContent = `Page ${pages}`;
@@ -799,8 +815,13 @@ ui.engine.addEventListener("change", () => {
   log("voice engine: " + (engine === "system" ? "iPhone voice" : `Kitten (${engine.replace("kitten-", "")})`));
   renderVoiceSettings();
   if (engine !== "system") {
-    kittenLoad(engine);
     try { kittenAudio().resume(); } catch {}
+    if (kitten.model === engine && kitten.ready) { stopSpeech(); resetPreviews(); readCurrentPageIfIdle(); }
+    else kittenLoad(engine); // reads the current page once loaded
+  } else {
+    stopSpeech();
+    resetPreviews();
+    readCurrentPageIfIdle();
   }
 });
 ui.kittenVoice.addEventListener("change", () => { store.set("kittenVoice", ui.kittenVoice.value); kitten.cast = null; });

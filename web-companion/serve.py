@@ -22,6 +22,11 @@ class IsolatedHandler(http.server.SimpleHTTPRequestHandler):
     }
 
     def end_headers(self):
+        # Model/runtime files never change under the same name; the app files can.
+        if self.path.startswith("/models/"):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
