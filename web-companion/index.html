@@ -180,6 +180,12 @@ function log(msg) {
   const t = new Date().toLocaleTimeString();
   ui.log.textContent = `${t}  ${msg}\n` + ui.log.textContent.slice(0, 6000);
 }
+// Bluefy sometimes rejects with values that aren't Errors; show whatever we got.
+function describeError(e) {
+  if (!e) return "unknown error";
+  if (e.name || e.message) return `${e.name || "Error"}: ${e.message || ""}`;
+  try { return JSON.stringify(e); } catch { return String(e); }
+}
 function setStatus(state, text) { ui.status.dataset.state = state; ui.statusText.textContent = text; }
 
 // --- Reading mode ---------------------------------------------------------
@@ -245,6 +251,9 @@ function loadVoices() {
     v.lang && v.lang.toLowerCase().startsWith("en") &&
     !NOVELTY.test(v.name) &&
     !/speech\.synthesis\.voice|eloquence/i.test(v.voiceURI || ""));
+  // iOS lists a lower-quality "super-compact" copy next to the "compact" voice; keep the better one.
+  voices = voices.filter((v) => !/super-compact/i.test(v.voiceURI || "") ||
+    !voices.some((o) => o !== v && o.name === v.name && o.lang === v.lang && !/super-compact/i.test(o.voiceURI || "")));
   // Better-sounding voices first: iOS marks them in the voice id (…premium… / …enhanced…).
   const tier = (v) => { const s = (v.voiceURI || "") + " " + v.name;
     return /premium/i.test(s) ? 0 : /enhanced|neural|natural/i.test(s) ? 1 : 2; };
@@ -414,7 +423,8 @@ async function onDisconnected() {
   reconnecting = true;
   for (let i = 0; i < 5 && device && !device.gatt.connected; i++) {
     await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
-    try { await attach(); } catch (e) { log("reconnect " + (i + 1) + " failed: " + e.message); setStatus("idle", "Disconnected"); }
+    if (!device) break; // the user disconnected, or the first connect failed, meanwhile
+    try { await attach(); } catch (e) { log("reconnect " + (i + 1) + " failed: " + describeError(e)); setStatus("idle", "Disconnected"); }
   }
   reconnecting = false;
 }
@@ -444,7 +454,7 @@ ui.connect.addEventListener("click", async () => {
     device.addEventListener("gattserverdisconnected", onDisconnected);
     await attach();
   } catch (e) {
-    log("connect failed: " + e.name + ": " + e.message);
+    log("connect failed: " + describeError(e));
     setStatus(e.name === "NotFoundError" ? "idle" : "error", e.name === "NotFoundError" ? "Not connected" : "Couldn't connect");
     device = null;
     renderMode();
