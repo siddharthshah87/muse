@@ -1,0 +1,56 @@
+diff --git a/lib/hal/HalPowerManager.cpp b/lib/hal/HalPowerManager.cpp
+index bdba292f..d559588c 100644
+--- a/lib/hal/HalPowerManager.cpp
++++ b/lib/hal/HalPowerManager.cpp
+@@ -143,6 +143,9 @@ bool HalPowerManager::lightSleep(const HalGPIO& gpio) const {
+ #endif
+     return false;
+   }
++  if (radioHold.load()) {  // Margin/Muse: a BLE companion is connected
++    return false;
++  }
+ 
+   // Serialize wake-source arming with the render task's BUSY-wait slice (see
+   // sleepMutex declaration for the failure mode this prevents).
+@@ -211,6 +214,9 @@ bool HalPowerManager::onEinkBusyWaitSlice(const int8_t busyPin, const uint8_t bu
+ #endif
+     return false;
+   }
++  if (radioHold.load()) {  // Margin/Muse: a BLE companion is connected
++    return false;
++  }
+ 
+   // Mid-debounce: committing needs a second sample, so let the SDK's short poll
+   // delay run instead of halting the chip. Same guard lightSleep() gets in loop().
+diff --git a/lib/hal/HalPowerManager.h b/lib/hal/HalPowerManager.h
+index 12bd114d..07b96fd2 100644
+--- a/lib/hal/HalPowerManager.h
++++ b/lib/hal/HalPowerManager.h
+@@ -6,6 +6,7 @@
+ #include <Logging.h>
+ #include <freertos/semphr.h>
+ 
++#include <atomic>
+ #include <cassert>
+ 
+ #include "HalGPIO.h"
+@@ -22,6 +23,8 @@ class HalPowerManager {
+ 
+   enum LockMode { None, NormalSpeed };
+   LockMode currentLockMode = None;
++  // Margin/Muse: set while a BLE companion is connected (see setRadioHold).
++  std::atomic<bool> radioHold{false};
+   SemaphoreHandle_t modeMutex = nullptr;  // Protect access to currentLockMode
+   // Bumped by the main loop, read by the render task (see onEinkBusyWaitSlice).
+   // Single writer, naturally aligned: the 32-bit access is atomic on RISC-V.
+@@ -70,6 +73,10 @@ class HalPowerManager {
+   // Control CPU frequency for power saving
+   void setPowerSaving(bool enabled);
+ 
++  // Margin/Muse: light sleep stops the BLE radio long enough for a connected phone to drop
++  // the link (supervision timeout), so both sleepers skip it while this is held.
++  void setRadioHold(bool hold) { radioHold.store(hold); }
++
+   // Setup wake up GPIO and enter deep sleep
+   // Should be called inside main loop() to handle the currentLockMode
+   void startDeepSleep(HalGPIO& gpio) const;

@@ -2,6 +2,7 @@
 #include "muse_trace_backend.h"
 
 #include <NimBLEDevice.h>
+#include <HalPowerManager.h>
 #include <Logging.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -106,11 +107,15 @@ static int museGapLogger(ble_gap_event* event, void*) {
 class MuseCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* srv, ble_gap_conn_desc* desc) override {
         _clientConnected = true;
+        // Light sleep would silence the radio long enough for the phone to time the link out
+        // (HCI 0x08); stay out of it while a companion is connected (patch 0004).
+        powerManager.setRadioHold(true);
         muse_trace_log("BLE", "connected handle=%d", (int)desc->conn_handle);
         LOG_INF("MBLE", "Companion connected");
     }
     void onDisconnect(NimBLEServer* srv, ble_gap_conn_desc* desc) override {
         _clientConnected = false;
+        powerManager.setRadioHold(false);
         muse_trace_log("BLE", "disconnected handle=%d", (int)desc->conn_handle);
         LOG_INF("MBLE", "Companion disconnected — restarting advertising");
         srv->startAdvertising();
