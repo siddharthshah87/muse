@@ -63,10 +63,50 @@ class ControlCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+// Raw GAP events into the trace ring: why links drop (HCI reason 0x2xx: 0x213 = peer closed,
+// 0x208 = supervision timeout, 0x216 = we closed, 0x23e = failed to establish), plus MTU,
+// connection-parameter, encryption and subscription changes. Dump with CMD:TRACE.
+static int museGapLogger(ble_gap_event* event, void*) {
+    switch (event->type) {
+        case BLE_GAP_EVENT_CONNECT:
+            muse_trace_log("GAP", "connect status=%d handle=%d", event->connect.status, event->connect.conn_handle);
+            break;
+        case BLE_GAP_EVENT_DISCONNECT:
+            muse_trace_log("GAP", "disconnect reason=0x%x handle=%d", event->disconnect.reason,
+                           event->disconnect.conn.conn_handle);
+            break;
+        case BLE_GAP_EVENT_CONN_UPDATE:
+            muse_trace_log("GAP", "conn params updated status=%d", event->conn_update.status);
+            break;
+        case BLE_GAP_EVENT_CONN_UPDATE_REQ:
+            muse_trace_log("GAP", "peer asks conn itvl %d-%d latency %d timeout %d",
+                           event->conn_update_req.peer_params->itvl_min, event->conn_update_req.peer_params->itvl_max,
+                           event->conn_update_req.peer_params->latency,
+                           event->conn_update_req.peer_params->supervision_timeout);
+            break;
+        case BLE_GAP_EVENT_MTU:
+            muse_trace_log("GAP", "mtu=%d", event->mtu.value);
+            break;
+        case BLE_GAP_EVENT_ENC_CHANGE:
+            muse_trace_log("GAP", "encryption change status=%d", event->enc_change.status);
+            break;
+        case BLE_GAP_EVENT_SUBSCRIBE:
+            muse_trace_log("GAP", "subscribe attr=%d notify=%d", event->subscribe.attr_handle,
+                           event->subscribe.cur_notify);
+            break;
+        case BLE_GAP_EVENT_REPEAT_PAIRING:
+            muse_trace_log("GAP", "repeat pairing");
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
 class MuseCallbacks : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer* srv) override {
+    void onConnect(NimBLEServer* srv, ble_gap_conn_desc* desc) override {
         _clientConnected = true;
-        muse_trace_log("BLE", "connected handle=%d", (int)0);
+        muse_trace_log("BLE", "connected handle=%d", (int)desc->conn_handle);
         LOG_INF("MBLE", "Companion connected");
     }
     void onDisconnect(NimBLEServer* srv, ble_gap_conn_desc* desc) override {
@@ -82,6 +122,7 @@ static void bleInitTask(void*) {
     LOG_INF("MBLE", "BLE init task starting (core %d)", xPortGetCoreID());
 
     NimBLEDevice::init("Margin");
+    NimBLEDevice::setCustomGapHandler(museGapLogger);
     muse_trace_log("BLE", "NimBLE init done heap=%u", esp_get_free_heap_size());
 
     _server = NimBLEDevice::createServer();
