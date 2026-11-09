@@ -218,6 +218,7 @@ function setMode(next) {
   mode = next;
   store.set("mode", mode);
   paused = false;
+  heldFragment = "";
   clearWait();
   if (mode === "self") stopSpeech();
   renderMode();
@@ -269,8 +270,34 @@ function loadVoices() {
 
 // Sentence-sized pieces: the last piece ending reliably marks the page as done,
 // and short utterances avoid browsers that cut long speech off silently.
+// The X4 hyphenates at line ends and its page text keeps the split: "be- hind" within a page,
+// and "strate-" | "gies" across a page break. Rejoin both before speaking.
+const LINE_HYPHEN = /([a-z])- (?=[a-z])/g;
+const PAGE_END_FRAGMENT = /(\S*[A-Za-z])-$/;
+let heldFragment = ""; // first half of a word split by the previous page break
+
+function cleanForSpeech(text) {
+  return text.replace(/\s+/g, " ").trim().replace(LINE_HYPHEN, "$1");
+}
+
+// Text to speak for a newly arrived page: finishes a word held from the previous page and holds
+// back a word this page ends halfway through.
+function pageSpeech(text) {
+  let t = cleanForSpeech(text);
+  if (heldFragment) {
+    t = /^[a-z]/.test(t) ? heldFragment + t : `${heldFragment} ${t}`;
+    heldFragment = "";
+  }
+  const m = t.match(PAGE_END_FRAGMENT);
+  if (m) {
+    heldFragment = m[1];
+    t = t.slice(0, m.index).trim();
+  }
+  return t;
+}
+
 function splitForSpeech(text) {
-  const sentences = text.replace(/\s+/g, " ").trim().match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*|$)\s*/g) || [];
+  const sentences = cleanForSpeech(text).match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*|$)\s*/g) || [];
   const pieces = [];
   let cur = "";
   for (const s of sentences) {
@@ -306,6 +333,15 @@ function speakPage(text, onDone) {
   const token = speakToken;
   speaking = true;
   renderPause();
+  let finished = false, lastStarted = false, watch = null;
+  const finish = () => {
+    if (finished || token !== speakToken) return;
+    finished = true;
+    clearInterval(watch);
+    speaking = false;
+    renderPause();
+    onDone && onDone();
+  };
   pieces.forEach((piece, i) => {
     const u = makeUtterance(piece);
     u.onerror = (e) => {
@@ -313,15 +349,21 @@ function speakPage(text, onDone) {
       if (e.error !== "interrupted" && e.error !== "canceled") log("speech error: " + e.error);
     };
     if (i === pieces.length - 1) {
-      u.onend = () => {
-        if (token !== speakToken) return; // cancelled or replaced
-        speaking = false;
-        renderPause();
-        onDone && onDone();
-      };
+      u.onstart = () => { lastStarted = true; };
+      u.onend = finish;
     }
     try { synth.speak(u); } catch (e) { log("speech failed: " + e.message); }
   });
+  // iOS sometimes never fires onend for the last utterance. If it has started and speech has
+  // since stopped, the page is done. (Never advance when speech didn't start: a broken audio
+  // route must not race through the book in silence.)
+  watch = setInterval(() => {
+    if (token !== speakToken || finished) { clearInterval(watch); return; }
+    if (lastStarted && !synth.speaking && !synth.pending) {
+      log("speech ended without an end event; carrying on");
+      finish();
+    }
+  }, 700);
 }
 
 // --- Continuous reading ---------------------------------------------------
@@ -383,7 +425,7 @@ function onPage(text, bytes) {
   ui.replay.disabled = false;
   updateStats();
   renderPause();
-  speakPage(text, afterPage);
+  speakPage(pageSpeech(text), afterPage);
 }
 
 function onChunk(event) {
@@ -406,6 +448,7 @@ async function attach() {
   ch.addEventListener("characteristicvaluechanged", onChunk);
   await ch.startNotifications();
   assembler.reset();
+  heldFragment = "";
   setStatus("connected", "Connected");
   ui.connect.textContent = "Disconnect";
   log("connected to " + (device.name || device.id) + (controlChar ? " (continuous supported)" : ""));
