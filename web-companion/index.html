@@ -219,6 +219,7 @@ function setMode(next) {
   store.set("mode", mode);
   paused = false;
   heldFragment = "";
+  turnOwed = false;
   clearWait();
   if (mode === "self") stopSpeech();
   renderMode();
@@ -305,7 +306,8 @@ function splitForSpeech(text) {
     cur += s;
   }
   if (cur.trim()) pieces.push(cur.trim());
-  return pieces;
+  // iOS skips text with nothing to pronounce (a lone "”", "—" or "*") without firing any events.
+  return pieces.filter((piece) => /[\p{L}\p{N}]/u.test(piece));
 }
 
 function stopSpeech() {
@@ -333,7 +335,7 @@ function speakPage(text, onDone) {
   const token = speakToken;
   speaking = true;
   renderPause();
-  let finished = false, lastStarted = false, watch = null;
+  let finished = false, anyStarted = false, watch = null;
   const finish = () => {
     if (finished || token !== speakToken) return;
     finished = true;
@@ -348,18 +350,19 @@ function speakPage(text, onDone) {
       if (token !== speakToken) return;
       if (e.error !== "interrupted" && e.error !== "canceled") log("speech error: " + e.error);
     };
-    if (i === pieces.length - 1) {
-      u.onstart = () => { lastStarted = true; };
-      u.onend = finish;
-    }
+    u.onstart = () => { anyStarted = true; };
+    if (i === pieces.length - 1) u.onend = finish;
     try { synth.speak(u); } catch (e) { log("speech failed: " + e.message); }
   });
-  // iOS sometimes never fires onend for the last utterance. If it has started and speech has
-  // since stopped, the page is done. (Never advance when speech didn't start: a broken audio
-  // route must not race through the book in silence.)
+  // iOS sometimes never fires onend for the last utterance, or skips it. Once speech on this page
+  // has started and the queue has gone quiet, the page is done. (Never advance when nothing
+  // started: a broken audio route must not race through the book in silence.)
+  let quietSince = 0;
   watch = setInterval(() => {
     if (token !== speakToken || finished) { clearInterval(watch); return; }
-    if (lastStarted && !synth.speaking && !synth.pending) {
+    const quiet = !synth.speaking && !synth.pending;
+    quietSince = quiet ? (quietSince || Date.now()) : 0;
+    if (anyStarted && quiet && Date.now() - quietSince >= 1200) {
       log("speech ended without an end event; carrying on");
       finish();
     }
@@ -369,14 +372,23 @@ function speakPage(text, onDone) {
 // --- Continuous reading ---------------------------------------------------
 function clearWait() { if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; } }
 
+let turnOwed = false; // a page finished while the link was down: turn as soon as we're back
+
 async function requestNextPage() {
-  if (mode !== "continuous" || paused || !controlChar || !(device && device.gatt.connected)) return;
+  if (mode !== "continuous" || paused) return;
+  if (!controlChar || !(device && device.gatt.connected)) {
+    turnOwed = Boolean(device); // still trying to reconnect
+    if (turnOwed) log("page read while disconnected; will turn after reconnecting");
+    return;
+  }
+  turnOwed = false;
   clearWait();
   try {
     const cmd = new Uint8Array([CMD_NEXT_PAGE]);
     if (controlChar.writeValueWithoutResponse) await controlChar.writeValueWithoutResponse(cmd);
     else await controlChar.writeValue(cmd);
     setStatus("connected", "Turning page…");
+    log("page read; asked the X4 to turn");
     waitTimer = setTimeout(() => {
       setStatus("connected", "Connected");
       log("no new page from the X4 after " + NEXT_PAGE_WAIT_MS / 1000 + " s (end of book, or the X4 is busy)");
@@ -386,7 +398,7 @@ async function requestNextPage() {
   }
 }
 
-function afterPage() { if (mode === "continuous") requestNextPage(); }
+function afterPage() { if (mode === "continuous") requestNextPage(); else log("page read"); }
 
 function renderPause() {
   const active = mode !== "self" && Boolean(lastText);
@@ -453,6 +465,7 @@ async function attach() {
   ui.connect.textContent = "Disconnect";
   log("connected to " + (device.name || device.id) + (controlChar ? " (continuous supported)" : ""));
   renderMode();
+  if (turnOwed && mode === "continuous" && !paused) setTimeout(requestNextPage, 300);
 }
 
 async function onDisconnected() {
