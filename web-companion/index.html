@@ -15,6 +15,7 @@
   backgrounded, and "Connect" needs a tap each visit.
 -->
 <script src="vendor/NoSleep.min.js"></script>
+<script src="dialogue-voices.js"></script>
 <style>
   :root {
     --bg: #f6f3ee; --surface: #ffffff; --text: #1d1b17; --muted: #6b665c;
@@ -74,6 +75,9 @@
   .note { font-size: 14px; color: var(--muted); margin-top: 16px; }
   .note.warn { color: var(--warn); }
   .voice-settings[hidden] { display: none; }
+  [hidden] { display: none !important; }
+  .check { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: 16px; margin-top: 14px; }
+  .check input { width: 22px; height: 22px; accent-color: var(--accent); }
   details { margin-top: 16px; font-size: 13px; color: var(--muted); }
   #log { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; max-height: 240px; overflow: auto; margin: 8px 0 0; }
 </style>
@@ -112,8 +116,27 @@
   <label for="rate">Speed</label>
   <div class="row"><input id="rate" type="range" min="0.5" max="1.5" step="0.05" value="0.9"><span class="rate-value" id="rate-value">0.90×</span></div>
 
-  <label for="voice">Voice</label>
-  <select id="voice"><option value="">System default</option></select>
+  <label for="engine">Voice engine</label>
+  <select id="engine">
+    <option value="system">iPhone voice</option>
+    <option value="kitten-nano">Neural voice: Kitten nano (24 MB)</option>
+    <option value="kitten-micro">Neural voice: Kitten micro (41 MB, a little better)</option>
+  </select>
+
+  <div id="system-voice-row">
+    <label for="voice">Voice</label>
+    <select id="voice"><option value="">System default</option></select>
+  </div>
+
+  <div id="kitten-row" hidden>
+    <p class="note" id="kitten-status" style="margin-top:8px"></p>
+    <label for="kitten-voice">Narrator voice</label>
+    <select id="kitten-voice">
+      <option>Bella</option><option>Luna</option><option>Rosie</option><option>Kiki</option>
+      <option>Jasper</option><option>Bruno</option><option>Hugo</option><option>Leo</option>
+    </select>
+    <label class="check"><input type="checkbox" id="characters" checked> Character voices for dialogue</label>
+  </div>
 </div>
 
 <p class="note">The screen stays on while connected. If the phone locks or you switch apps, the connection and speech stop.</p>
@@ -129,6 +152,8 @@ const SERVICE = "4d555345-0001-1000-8000-000000000000";
 const PAGE_CHAR = "4d555345-0002-1000-8000-000000000000";
 const CONTROL_CHAR = "4d555345-0004-1000-8000-000000000000";
 const CMD_NEXT_PAGE = 0x01;
+const CMD_PEEK_NEXT = 0x02;  // X4 sends the next page's text without turning (preview)
+const PREVIEW_FLAG = 0x80;   // set on seq bytes of preview chunks
 const NEXT_PAGE_WAIT_MS = 15000; // warn if the X4 hasn't sent the next page by then
 
 // --- Page reassembly: same rules as companion/src/pageAssembler.ts ---------
@@ -172,6 +197,8 @@ const ui = {
   page: $("page"), pageLabel: $("page-label"), stats: $("stats"),
   replay: $("replay"), pause: $("pause"), rate: $("rate"), rateValue: $("rate-value"),
   voice: $("voice"), voiceSettings: $("voice-settings"), log: $("log"),
+  engine: $("engine"), kittenRow: $("kitten-row"), systemVoiceRow: $("system-voice-row"),
+  kittenVoice: $("kitten-voice"), kittenStatus: $("kitten-status"), characters: $("characters"),
   unsupported: $("unsupported"), modeHint: $("mode-hint"),
   modeButtons: [...document.querySelectorAll(".modes button")],
 };
@@ -220,6 +247,7 @@ function setMode(next) {
   paused = false;
   heldFragment = "";
   turnOwed = false;
+  resetPreviews();
   clearWait();
   if (mode === "self") stopSpeech();
   renderMode();
@@ -314,6 +342,7 @@ function stopSpeech() {
   speakToken++;
   speaking = false;
   try { if (synth) synth.cancel(); } catch {}
+  kittenStopPlayback();
   renderPause();
 }
 
@@ -326,10 +355,24 @@ function makeUtterance(text) {
   return u;
 }
 
-// Speaks one page; onDone runs only if the page was read to the end.
-function speakPage(text, onDone) {
+// Speaks one page; onDone runs only if the page was read to the end. `prepared` is a page
+// whose Kitten audio was generated in advance (gapless continuous reading).
+function speakPage(text, onDone, prepared) {
   stopSpeech(); // a new page interrupts the old one
-  if (!synth || mode === "self" || paused) return;
+  if (mode === "self" || paused) { if (prepared) kittenDiscard(prepared.job); return; }
+  if (kittenActive()) {
+    const job = (prepared && prepared.job) || kittenPrepare(text);
+    const token = speakToken;
+    speaking = true;
+    renderPause();
+    kittenPlay(job, token, () => { speaking = false; renderPause(); onDone && onDone(); });
+    return;
+  }
+  speakSystem(text, onDone);
+}
+
+function speakSystem(text, onDone) {
+  if (!synth) return;
   const pieces = splitForSpeech(text);
   if (!pieces.length) { onDone && onDone(); return; }
   const token = speakToken;
@@ -369,6 +412,204 @@ function speakPage(text, onDone) {
   }, 700);
 }
 
+// --- Kitten neural voice (kitten-worker.js) ------------------------------------
+// Audio is generated on this phone in a worker and played through Web Audio, so the page knows
+// exactly when a page has finished (no reliance on iOS speech events).
+const KITTEN_MODELS = { "kitten-nano": "nano-0.8-int8", "kitten-micro": "micro-0.8" };
+let engine = "system", characters = true;
+const kitten = { worker: null, model: null, ready: false, ctx: null, nextId: 1, jobs: new Map(),
+                 playing: null, sources: [], cast: null };
+
+function kittenAudio() {
+  if (!kitten.ctx) {
+    // Let Web Audio play with the ringer switch on silent, like speech does (Safari audio session API).
+    try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch {}
+    kitten.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  return kitten.ctx;
+}
+
+function kittenActive() { return engine !== "system" && kitten.ready; }
+
+function kittenLoad(choice) {
+  if (kitten.model === choice && kitten.worker) return;
+  if (kitten.worker) kitten.worker.terminate();
+  Object.assign(kitten, { ready: false, model: choice, jobs: new Map(), playing: null, cast: null });
+  ui.kittenStatus.textContent = "Loading the neural voice… the iPhone voice reads until it is ready.";
+  const w = new Worker("./kitten-worker.js", { type: "module" });
+  kitten.worker = w;
+  w.onerror = (e) => {
+    log("voice worker error: " + (e.message || e));
+    ui.kittenStatus.textContent = "Couldn't load the neural voice; using the iPhone voice.";
+  };
+  w.onmessage = ({ data }) => {
+    if (w !== kitten.worker) return;
+    if (data.type === "loaded") {
+      kitten.ready = true;
+      ui.kittenStatus.textContent = `Neural voice ready (${data.threads} thread${data.threads > 1 ? "s" : ""}).`;
+      log(`Kitten ${choice} loaded in ${data.secs.toFixed(1)} s, ${data.threads} threads`);
+      return;
+    }
+    if (data.type === "error" && data.where === "load") {
+      ui.kittenStatus.textContent = "Couldn't load the neural voice; using the iPhone voice.";
+      log("Kitten load failed: " + data.message.split("\n")[0]);
+      return;
+    }
+    const job = kitten.jobs.get(data.id);
+    if (!job) return;
+    if (data.type === "chunk") {
+      job.chunks.push(data.samples);
+      if (job.onChunk) job.onChunk(data.samples);
+    } else if (data.type === "done" || data.type === "cancelled" || data.type === "error") {
+      job.done = true;
+      job.failed = data.type === "error";
+      if (job.failed) log("Kitten synthesis failed: " + data.message.split("\n")[0]);
+      if (job.onFinished) job.onFinished();
+    }
+  };
+  w.postMessage({ type: "load", model: KITTEN_MODELS[choice] });
+}
+
+function kittenPieces(text) {
+  const narrator = ui.kittenVoice.value;
+  if (!kitten.cast || kitten.cast.narrator !== narrator) kitten.cast = new MarginDialogue.Cast(narrator);
+  const segments = characters ? MarginDialogue.assignVoices(text, kitten.cast) : [{ text, voice: narrator }];
+  const pieces = [];
+  for (const seg of segments) for (const piece of splitForSpeech(seg.text)) pieces.push({ text: piece, voice: seg.voice });
+  return pieces;
+}
+
+// Starts generating a page's audio (queued behind any page already being generated).
+function kittenPrepare(text) {
+  const id = kitten.nextId++;
+  const job = { id, text, chunks: [], done: false, failed: false, onChunk: null, onFinished: null };
+  kitten.jobs.set(id, job);
+  const pieces = kittenPieces(text);
+  if (!pieces.length) { job.done = true; return job; }
+  kitten.worker.postMessage({ type: "synth", id, pieces, rate: parseFloat(ui.rate.value) });
+  return job;
+}
+
+function kittenDiscard(job) {
+  if (!job || !kitten.jobs.has(job.id)) return;
+  kitten.jobs.delete(job.id);
+  if (!job.done && kitten.worker) kitten.worker.postMessage({ type: "cancel", id: job.id });
+}
+
+function kittenStopPlayback() {
+  for (const src of kitten.sources) { src.onended = null; try { src.stop(); } catch {} }
+  kitten.sources = [];
+  if (kitten.playing) {
+    const job = kitten.playing;
+    kitten.playing = null;
+    job.onChunk = null;
+    job.onFinished = null;
+    kittenDiscard(job);
+  }
+}
+
+// Plays a prepared page back to back as its pieces arrive; onDone when the last one has played.
+function kittenPlay(job, token, onDone) {
+  kitten.playing = job;
+  const ctx = kittenAudio();
+  ctx.resume();
+  let playAt = ctx.currentTime + 0.05, scheduled = 0, ended = 0;
+  const finishIfDone = () => {
+    if (token !== speakToken || kitten.playing !== job || !job.done || ended < scheduled) return;
+    kitten.playing = null;
+    kitten.jobs.delete(job.id);
+    if (job.failed && scheduled === 0) {
+      log("neural voice failed on this page; reading it with the iPhone voice");
+      speakSystem(job.text, onDone);
+    } else {
+      onDone();
+    }
+  };
+  const schedule = (samples) => {
+    if (token !== speakToken || kitten.playing !== job) return;
+    const buffer = ctx.createBuffer(1, samples.length, 24000);
+    buffer.copyToChannel(samples, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(ctx.destination);
+    playAt = Math.max(playAt, ctx.currentTime + 0.02);
+    src.start(playAt);
+    playAt += buffer.duration + 0.18; // short breath between sentences
+    scheduled++;
+    kitten.sources.push(src);
+    src.onended = () => {
+      ended++;
+      kitten.sources = kitten.sources.filter((s) => s !== src);
+      finishIfDone();
+    };
+  };
+  job.chunks.forEach(schedule);
+  job.onChunk = schedule;
+  job.onFinished = finishIfDone;
+  finishIfDone(); // already finished and empty
+}
+
+function renderVoiceSettings() {
+  const neural = engine !== "system";
+  ui.kittenRow.hidden = !neural;
+  ui.systemVoiceRow.hidden = neural;
+}
+
+// --- Gapless continuous reading (PEEK_NEXT, shared/protocol/ble.md) ----------------
+// While a page is read, the X4 sends the next page's text as a preview; with the neural voice
+// its audio is generated meanwhile. When the page ends, the turn and the next page start
+// together, and the real page that follows the turn is only a confirmation.
+const previewAssembler = new PageAssembler();
+let nextPrepared = null; // {text, speech, job}
+let confirmText = null;  // page we already started at the turn
+let peekOk = null, peekTimer = null;
+
+function resetPreviews() {
+  clearTimeout(peekTimer);
+  peekTimer = null;
+  if (nextPrepared) kittenDiscard(nextPrepared.job);
+  nextPrepared = null;
+  confirmText = null;
+  previewAssembler.reset();
+}
+
+async function requestPeek() {
+  if (mode !== "continuous" || paused || peekOk === false || !controlChar || !(device && device.gatt.connected)) return;
+  if (peekOk === null && !peekTimer) {
+    peekTimer = setTimeout(() => {
+      peekTimer = null;
+      if (peekOk === null) { peekOk = false; log("this X4 firmware sends no previews; turning first, then reading"); }
+    }, 2500);
+  }
+  try {
+    const cmd = new Uint8Array([CMD_PEEK_NEXT]);
+    if (controlChar.writeValueWithoutResponse) await controlChar.writeValueWithoutResponse(cmd);
+    else await controlChar.writeValue(cmd);
+  } catch (e) { /* turn-then-read still works */ }
+}
+
+function onPreview(text) {
+  clearTimeout(peekTimer);
+  peekTimer = null;
+  peekOk = true;
+  if (nextPrepared) { kittenDiscard(nextPrepared.job); nextPrepared = null; }
+  if (!text.trim() || mode !== "continuous" || paused) return; // not laid out yet, or no text: turn first
+  const speech = pageSpeech(text);
+  nextPrepared = { text, speech, job: kittenActive() ? kittenPrepare(speech) : null };
+  log(kittenActive() ? "next page previewed; preparing its audio" : "next page previewed");
+}
+
+function showPage(text) {
+  pages++;
+  lastText = text;
+  ui.page.textContent = text;
+  ui.page.classList.remove("empty");
+  ui.pageLabel.textContent = `Page ${pages}`;
+  ui.replay.disabled = false;
+  updateStats();
+  renderPause();
+}
+
 // --- Continuous reading ---------------------------------------------------
 function clearWait() { if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; } }
 
@@ -398,7 +639,17 @@ async function requestNextPage() {
   }
 }
 
-function afterPage() { if (mode === "continuous") requestNextPage(); else log("page read"); }
+function afterPage() {
+  if (mode !== "continuous") { log("page read"); return; }
+  const next = nextPrepared;
+  nextPrepared = null;
+  if (next && !paused) {
+    confirmText = next.text;
+    showPage(next.text);
+    speakPage(next.speech, afterPage, next); // starts with the turn: no gap
+  }
+  requestNextPage();
+}
 
 function renderPause() {
   const active = mode !== "self" && Boolean(lastText);
@@ -408,8 +659,8 @@ function renderPause() {
 ui.pause.addEventListener("click", () => {
   paused = !paused;
   clearWait();
-  if (paused) { stopSpeech(); setStatus("connected", device && device.gatt.connected ? "Paused" : "Disconnected"); }
-  else { if (device && device.gatt.connected) setStatus("connected", "Connected"); speakPage(lastText, afterPage); }
+  if (paused) { stopSpeech(); resetPreviews(); setStatus("connected", device && device.gatt.connected ? "Paused" : "Disconnected"); }
+  else { if (device && device.gatt.connected) setStatus("connected", "Connected"); speakPage(lastText, afterPage); requestPeek(); }
   renderPause();
 });
 
@@ -423,26 +674,40 @@ function updateStats() { ui.stats.textContent = discarded ? `${pages} pages · $
 function onPage(text, bytes) {
   clearWait();
   if (device && device.gatt.connected && !paused) setStatus("connected", "Connected");
+  // The page we already started reading at the turn: just look ahead again.
+  if (confirmText !== null && text === confirmText) {
+    confirmText = null;
+    requestPeek();
+    return;
+  }
+  confirmText = null;
+  // Turned by hand onto the page we had prepared: play it as is.
+  const prepared = nextPrepared && nextPrepared.text === text ? nextPrepared : null;
+  if (nextPrepared && !prepared) { kittenDiscard(nextPrepared.job); heldFragment = ""; } // reader moved elsewhere
+  nextPrepared = null;
   if (!text.trim()) {  // image or blank page: nothing to read
     log("page without text" + (mode === "continuous" && !paused ? ", skipping ahead" : ""));
     ui.pageLabel.textContent = "Page without text";
     if (mode === "continuous" && !paused) setTimeout(requestNextPage, 400);
     return;
   }
-  pages++;
-  lastText = text;
-  ui.page.textContent = text;
-  ui.page.classList.remove("empty");
-  ui.pageLabel.textContent = `Page ${pages} · ${bytes} bytes`;
-  ui.replay.disabled = false;
-  updateStats();
-  renderPause();
-  speakPage(pageSpeech(text), afterPage);
+  showPage(text);
+  if (prepared) speakPage(prepared.speech, afterPage, prepared);
+  else speakPage(pageSpeech(text), afterPage);
+  requestPeek();
 }
 
 function onChunk(event) {
   const dv = event.target.value;
-  const res = assembler.push(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+  const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  if (bytes.length && (bytes[0] & PREVIEW_FLAG)) {
+    const unflagged = bytes.slice();
+    unflagged[0] &= ~PREVIEW_FLAG;
+    const preview = previewAssembler.push(unflagged);
+    if (preview && !preview.discarded) onPreview(preview.text);
+    return;
+  }
+  const res = assembler.push(bytes);
   if (!res) return;
   if (res.discarded) { discarded++; updateStats(); log("partial page dropped (missed chunk)"); return; }
   onPage(res.text, res.bytes);
@@ -461,6 +726,8 @@ async function attach() {
   await ch.startNotifications();
   assembler.reset();
   heldFragment = "";
+  resetPreviews();
+  peekOk = null;
   setStatus("connected", "Connected");
   ui.connect.textContent = "Disconnect";
   log("connected to " + (device.name || device.id) + (controlChar ? " (continuous supported)" : ""));
@@ -500,10 +767,11 @@ ui.connect.addEventListener("click", async () => {
     d.gatt.disconnect(); renderMode(); return;
   }
   keepScreenOn();
-  // iOS only lets a page talk after a tap: say something short now so later pages can be spoken.
+  // iOS only lets a page make sound after a tap: unlock speech and Web Audio now.
   try {
     if (synth && mode !== "self") { synth.cancel(); synth.speak(makeUtterance("Margin is ready.")); }
   } catch (e) { log("speech unavailable: " + e.message); }
+  if (engine !== "system") { try { kittenAudio().resume(); } catch (e) { log("audio unavailable: " + e.message); } }
   try {
     setStatus("busy", "Choose Margin…");
     device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }, { name: "Margin" }], optionalServices: [SERVICE] });
@@ -524,8 +792,27 @@ ui.voice.addEventListener("change", () => {
   if (lastText && mode !== "self" && !speaking) { const first = splitForSpeech(lastText)[0]; if (first) speakPage(first); }
 });
 
+ui.engine.addEventListener("change", () => {
+  engine = ui.engine.value;
+  store.set("engine", engine);
+  renderVoiceSettings();
+  if (engine !== "system") {
+    kittenLoad(engine);
+    try { kittenAudio().resume(); } catch {}
+  }
+});
+ui.kittenVoice.addEventListener("change", () => { store.set("kittenVoice", ui.kittenVoice.value); kitten.cast = null; });
+ui.characters.addEventListener("change", () => { characters = ui.characters.checked; store.set("characters", characters ? "1" : "0"); });
+
 // --- Init ------------------------------------------------------------------
 if (!HINTS[mode]) mode = "page";
+engine = KITTEN_MODELS[store.get("engine", "system")] ? store.get("engine", "system") : "system";
+ui.engine.value = engine;
+ui.kittenVoice.value = store.get("kittenVoice", "Bella");
+characters = store.get("characters", "1") === "1";
+ui.characters.checked = characters;
+renderVoiceSettings();
+if (engine !== "system") kittenLoad(engine);
 ui.rate.value = store.get("rate", "0.9");
 ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×";
 if (synth) { loadVoices(); synth.addEventListener?.("voiceschanged", loadVoices); }

@@ -39,3 +39,6 @@ Thumbs.db
 *.swp
 .vscode/*.log
 .venv-tracing/
+
+# Large/vendored assets for browser voice tests (downloaded, not tracked)
+web-companion/models/

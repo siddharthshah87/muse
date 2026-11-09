@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kitten Speed Test</title>
+<!--
+  Personal test: can Kitten TTS v0.8 (Apache-2.0, KittenML) generate speech faster than real time
+  in this phone's browser? Model, ONNX runtime and phonemizer are served from the NUC
+  (web-companion/models/, not tracked in git); nothing about the text leaves the phone.
+  Note: the phonemizer is eSpeak NG compiled to WebAssembly (GPL) - review before shipping.
+-->
+<style>
+  :root { --bg:#f6f3ee; --surface:#fff; --text:#1d1b17; --muted:#6b665c; --line:#e4ded3; --accent:#2f5d50; --accent-text:#fff; --good:#2f6b3a; --bad:#9a4a1c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#16140f; --surface:#201d17; --text:#ece7dd; --muted:#a39d90; --line:#353027; --accent:#7fb8a6; --accent-text:#10201b; --good:#8fcf9a; --bad:#e3a072; } }
+  :root[data-theme="dark"] { --bg:#16140f; --surface:#201d17; --text:#ece7dd; --muted:#a39d90; --line:#353027; --accent:#7fb8a6; --accent-text:#10201b; --good:#8fcf9a; --bad:#e3a072; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 17px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); max-width: 640px; margin: 0 auto; }
+  h1 { font: 600 22px/1.2 Georgia, serif; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 16px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-top: 14px; }
+  .facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 14px; margin: 0; }
+  .facts dt { color: var(--muted); } .facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 10px 0 6px; }
+  select { width: 100%; font: inherit; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  button { font: inherit; width: 100%; border: 0; border-radius: 12px; padding: 14px 18px; min-height: 48px; background: var(--accent); color: var(--accent-text); font-weight: 600; margin-top: 12px; }
+  button:disabled { opacity: 0.5; }
+  .verdict { font: 600 28px/1.2 Georgia, serif; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  .verdict.good { color: var(--good); } .verdict.bad { color: var(--bad); }
+  #log { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; color: var(--muted); max-height: 240px; overflow: auto; margin: 0; }
+</style>
+</head>
+<body>
+<h1>Kitten speed test</h1>
+<p class="sub">Can this browser generate Kitten TTS faster than it speaks? Above 1.5× real time reads pages without pauses.</p>
+
+<div class="card">
+  <dl class="facts">
+    <dt>Multithreading</dt><dd id="f-threads">checking…</dd>
+    <dt>CPU cores</dt><dd id="f-cores">–</dd>
+  </dl>
+  <label for="model">Model</label>
+  <select id="model">
+    <option value="nano-0.8-int8">Nano (24 MB, fastest)</option>
+    <option value="micro-0.8">Micro (41 MB)</option>
+    <option value="mini-0.8">Mini (78 MB, best, slowest)</option>
+  </select>
+  <button id="load">Load the voice</button>
+  <p class="sub" id="load-status" style="margin:8px 0 0"></p>
+</div>
+
+<div class="card">
+  <label for="voice">Voice</label>
+  <select id="voice">
+    <option>Bella</option><option>Luna</option><option>Rosie</option><option>Kiki</option>
+    <option>Jasper</option><option>Bruno</option><option>Hugo</option><option>Leo</option>
+  </select>
+  <button id="run" disabled>Read a test passage</button>
+  <p class="verdict" id="verdict">–</p>
+  <p class="sub" id="detail" style="margin:0"></p>
+</div>
+
+<div class="card"><p class="sub" style="margin:0 0 6px">Diagnostics (newest first)</p><pre id="log"></pre></div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const log = (m) => { $("log").textContent = `${new Date().toLocaleTimeString()}  ${m}\n` + $("log").textContent; };
+const PASSAGE = "Some people question how we can apply logic and science to a world where people act irrationally. " +
+  "It turns out that there is often method to the madness. Indeed, some of the most exciting new insights " +
+  "have come from recent advances in behavioral game theory.";
+
+$("f-threads").textContent = window.crossOriginIsolated ? "yes" : "no (single-threaded WebAssembly)";
+$("f-cores").textContent = navigator.hardwareConcurrency || "unknown";
+log("UA: " + navigator.userAgent);
+
+const worker = new Worker("./kitten-worker.js", { type: "module" });
+worker.onerror = (e) => log("worker error: " + (e.message || e));
+let audioCtx = null, run = null;
+
+worker.onmessage = ({ data }) => {
+  if (data.type === "loaded") {
+    $("load-status").textContent = `Loaded ${$("model").value} in ${data.secs.toFixed(1)} s (${data.threads} thread${data.threads > 1 ? "s" : ""}).`;
+    log(`loaded ${$("model").value} in ${data.secs.toFixed(1)}s, ${data.threads} threads`);
+    $("load").disabled = false; $("run").disabled = false;
+  } else if (data.type === "chunk" && run) {
+    run.count++;
+    if (run.first === null) run.first = data.at;
+    const secs = data.samples.length / data.rate;
+    run.audioSecs += secs;
+    const buf = audioCtx.createBuffer(1, data.samples.length, data.rate);
+    buf.copyToChannel(data.samples, 0);
+    const src = audioCtx.createBufferSource(); src.buffer = buf; src.connect(audioCtx.destination);
+    run.playAt = Math.max(run.playAt, audioCtx.currentTime); src.start(run.playAt); run.playAt += buf.duration + 0.2;
+    $("detail").textContent = `Sentence ${run.count} ready after ${data.at.toFixed(1)} s (${secs.toFixed(1)} s of speech)…`;
+    log(`sentence ${run.count}: ${secs.toFixed(1)}s audio, ready at ${data.at.toFixed(1)}s`);
+  } else if (data.type === "done" && run) {
+    const rtf = run.audioSecs / data.secs, good = rtf >= 1.5;
+    $("verdict").textContent = `${rtf.toFixed(1)}× real time`;
+    $("verdict").className = "verdict " + (good ? "good" : "bad");
+    $("detail").textContent = `${run.audioSecs.toFixed(1)} s of speech generated in ${data.secs.toFixed(1)} s; first sentence ready after ${run.first.toFixed(1)} s. ` +
+      (good ? "Fast enough to read pages without pauses." : rtf >= 1 ? "Borderline: expect occasional pauses." : "Too slow: it would pause between sentences.");
+    log(`RESULT ${rtf.toFixed(2)}x realtime, first audio ${run.first.toFixed(2)}s, ${run.voice}, ${$("model").value}`);
+    clearInterval(run.timer); run = null; $("run").disabled = false;
+  } else if (data.type === "error") {
+    log(`${data.where} failed: ${data.message}`);
+    if (data.where === "load") { $("load-status").textContent = "Could not load: " + data.message.split("\n")[0]; $("load").disabled = false; }
+    else { $("verdict").textContent = "Failed"; $("verdict").className = "verdict bad"; $("detail").textContent = data.message.split("\n")[0];
+           if (run) clearInterval(run.timer); run = null; $("run").disabled = false; }
+  }
+};
+
+$("load").addEventListener("click", () => {
+  $("load").disabled = true; $("run").disabled = true;
+  $("load-status").textContent = `Loading ${$("model").value}…`;
+  worker.postMessage({ type: "load", model: $("model").value });
+});
+
+$("run").addEventListener("click", async () => {
+  $("run").disabled = true;
+  // The audio context must start inside the tap on iOS.
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume();
+  const voice = $("voice").value, t0 = performance.now();
+  run = { count: 0, first: null, audioSecs: 0, playAt: audioCtx.currentTime + 0.05, voice,
+          timer: setInterval(() => { if (run && run.count === 0) $("detail").textContent = `Working… ${((performance.now() - t0) / 1000).toFixed(0)} s`; }, 1000) };
+  $("verdict").textContent = "Generating…"; $("verdict").className = "verdict"; $("detail").textContent = "";
+  worker.postMessage({ type: "run", text: PASSAGE, voice });
+});
+</script>
+</body>
+</html>
