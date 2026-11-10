@@ -1,5 +1,5 @@
 diff --git a/src/activities/reader/EpubReaderActivity.cpp b/src/activities/reader/EpubReaderActivity.cpp
-index cee0dc72..f8f58691 100644
+index cee0dc72..f1fb5b67 100644
 --- a/src/activities/reader/EpubReaderActivity.cpp
 +++ b/src/activities/reader/EpubReaderActivity.cpp
 @@ -1,4 +1,6 @@
@@ -9,7 +9,16 @@ index cee0dc72..f8f58691 100644
  
  #include <Epub/Page.h>
  #include <Epub/blocks/TextBlock.h>
-@@ -288,6 +290,95 @@ void EpubReaderActivity::openDictionaryWordSelect() {
+@@ -12,6 +14,8 @@
+ #include <esp_system.h>
+ 
+ #include <algorithm>
++#include <climits>  // Margin/Muse
++#include <cstring>  // Margin/Muse
+ #include <functional>
+ #include <iterator>
+ #include <limits>
+@@ -288,6 +292,156 @@ void EpubReaderActivity::openDictionaryWordSelect() {
                           [this](const ActivityResult&) { requestUpdate(); });
  }
  
@@ -102,10 +111,71 @@ index cee0dc72..f8f58691 100644
 +  MuseBleServer::notifyBookInfo(json.c_str(), json.size());
 +}
 +
++// Margin/Muse: follow-along underline (BLE HIGHLIGHT 0x04). Drawn straight into the framebuffer and
++// shown with a FAST refresh (no full page re-render, so the full-refresh counter is untouched).
++// The pixels under each underline are saved first, so moving the highlight restores them exactly
++// (painting white would clip descenders).
++static int museRenderLeft = 0, museRenderTop = 0;  // margins of the page last rendered
++static int museHlSpine = -1, museHlPage = -1;       // page the saved strips belong to
++struct MuseHlStrip {
++  int16_t x, y, w;
++  uint8_t bytes[600];
++};
++static constexpr int MUSE_HL_MAX_LINES = 12;
++static MuseHlStrip museHlStrips[MUSE_HL_MAX_LINES];  // static: ~7 KB kept off the task stack
++static int museHlCount = 0;
++
++static void museHlRestore(GfxRenderer& renderer, int spine, int page) {
++  if (spine == museHlSpine && page == museHlPage) {
++    for (int i = museHlCount - 1; i >= 0; --i) {
++      const MuseHlStrip& st = museHlStrips[i];
++      renderer.writeFramebufferRegion(st.x, st.y, st.w, 2, st.bytes);
++    }
++  }
++  museHlCount = 0;  // a different page was rendered since: its framebuffer has no underlines
++  museHlSpine = spine;
++  museHlPage = page;
++}
++
++static void museHlDraw(GfxRenderer& renderer, const Page& page, int first, int last) {
++  const int fontId = SETTINGS.getReaderFontId();
++  const int ascender = renderer.getFontAscenderSize(fontId);
++  int k = 0;  // word index in museLoadPageText order
++  for (const auto& el : page.elements) {
++    if (el->getTag() != TAG_PageLine) continue;
++    const auto& line = static_cast<const PageLine&>(*el);
++    const auto& block = line.getBlock();
++    if (!block || block->isEmpty()) continue;
++    int x0 = INT_MAX, x1 = INT_MIN;
++    for (uint16_t i = 0; i < block->wordCount(); ++i, ++k) {
++      if (k < first || k > last) continue;
++      const char* text = block->wordText(i);
++      int x = line.xPos + block->wordXpos(i) + museRenderLeft;
++      if (strncmp(text, "\xE2\x80\x83", 3) == 0) {  // paragraph-indent em space: not underlined
++        x += renderer.getTextAdvanceX(fontId, "\xE2\x80\x83", block->wordStyle(i));
++        text += 3;
++      }
++      x0 = std::min(x0, x);
++      x1 = std::max(x1, x + renderer.getTextAdvanceX(fontId, text, block->wordStyle(i)));
++    }
++    if (x0 < x1 && museHlCount < MUSE_HL_MAX_LINES) {
++      MuseHlStrip& st = museHlStrips[museHlCount];
++      st.x = static_cast<int16_t>(x0);
++      st.y = static_cast<int16_t>(line.yPos + museRenderTop + block->getRubyShift(ascender) + ascender + 2);
++      st.w = static_cast<int16_t>(x1 - x0);
++      if (renderer.readFramebufferRegion(st.x, st.y, st.w, 2, st.bytes, sizeof(st.bytes))) {
++        museHlCount++;
++        renderer.fillRect(st.x, st.y, st.w, 2, true);
++      }
++    }
++    if (k > last) break;
++  }
++}
++
  void EpubReaderActivity::loop() {
    if (!epub) {
      finish();
-@@ -506,6 +597,40 @@ void EpubReaderActivity::loop() {
+@@ -506,6 +660,52 @@ void EpubReaderActivity::loop() {
      return;
    }
  
@@ -117,6 +187,18 @@ index cee0dc72..f8f58691 100644
 +  // Margin/Muse: send the next page's text without turning, so the companion can prepare its
 +  // audio and turn exactly when the current page finishes. Empty preview = not available yet
 +  // (next chapter not laid out); the companion then turns first and reads after.
++  // Margin/Muse: follow-along underline for the sentence being read aloud.
++  uint16_t hlChapter, hlPage, hlFirst, hlLast;
++  if (!RenderLock::peek() && MuseBleServer::takeHighlight(hlChapter, hlPage, hlFirst, hlLast) && section &&
++      !atEndOfBook && hlChapter == currentSpineIndex && hlPage == section->currentPage) {
++    RenderLock lock;
++    museHlRestore(renderer, currentSpineIndex, section->currentPage);
++    if (hlFirst != 0xFFFF) {
++      if (auto page = section->loadPage(section->currentPage)) museHlDraw(renderer, *page, hlFirst, hlLast);
++    }
++    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
++  }
++
 +  // Margin/Muse: save companion notes (written over BLE) for this book.
 +  if (!RenderLock::peek()) museSaveBookNotes(*epub);
 +
@@ -146,7 +228,7 @@ index cee0dc72..f8f58691 100644
    constexpr unsigned long kMinManualTurnGapMs = 200;
    const bool turnGuardActive = RenderLock::peek() || (millis() - lastPageTurnTime) < kMinManualTurnGapMs;
    if (pendingManualTurn != 0 && !turnGuardActive) {
-@@ -1333,9 +1458,32 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
+@@ -1333,9 +1533,32 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
                   ? currentPageVisibleOffset
                   : section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
    }
@@ -180,6 +262,16 @@ index cee0dc72..f8f58691 100644
  void EpubReaderActivity::rememberCurrentContentOffset() {
    cachedVisibleTextOffset.reset();
    if (section && section->currentPage >= 0 && section->currentPage < section->pageCount) {
+@@ -1348,6 +1571,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
+                                         const int orientedMarginLeft) {
+   const auto t0 = millis();
+   const int fontId = SETTINGS.getReaderFontId();
++  museRenderLeft = orientedMarginLeft;  // Margin/Muse: follow-along underline positions
++  museRenderTop = orientedMarginTop;
++  museHlSpine = -1;  // the new framebuffer has no underlines to restore
+ 
+   struct PxcSlotGuard {
+     ~PxcSlotGuard() { ImageBlock::releaseRenderCache(); }
 diff --git a/src/activities/reader/EpubReaderActivity.h b/src/activities/reader/EpubReaderActivity.h
 index 2a780876..4bb6d16e 100644
 --- a/src/activities/reader/EpubReaderActivity.h

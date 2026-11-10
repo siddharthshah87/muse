@@ -6,7 +6,7 @@
 // Book-notes char UUID: 4D555345-0005-1000-8000-000000000000 (companion's per-book JSON, on SD)
 // Control char UUID:   4D555345-0004-1000-8000-000000000000
 //                      (write 0x01 = next page, 0x02 = send next page's text without turning,
-//                       0x03 = send the current page's text)
+//                       0x03 = send the current page's text, 0x04 = underline words)
 //
 // Protocol: each notify carries [seq:u8][total:u8][utf8 payload…]
 // seq 0..(total-1) form a complete page, sent in order; receiver concatenates
@@ -40,6 +40,10 @@ public:
     // takeBookNotes() returns notes the companion wrote (0 if none), for the reader to save.
     static void setBookNotes(const char* data, size_t len);
     static size_t takeBookNotes(char* out, size_t cap);
+
+    // Latest follow-along request (0x04): underline words first..last (0-based, in page-text order)
+    // on chapter/page; first == 0xFFFF clears. Returns false if none since the last call.
+    static bool takeHighlight(uint16_t& chapter, uint16_t& page, uint16_t& first, uint16_t& last);
 
     // True once per companion SEND_CURRENT write (0x03), if it is under 3 s old.
     static bool takeCurrentPageRequest();

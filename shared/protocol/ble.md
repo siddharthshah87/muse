@@ -99,6 +99,7 @@ The companions use it to remember character voices:
 | `0x01` | `NEXT_PAGE` | The reader turns forward as if the page-forward button were pressed, through the same debounce. |
 | `0x02` | `PEEK_NEXT` | The reader sends the **next** page's text as a preview, without turning. |
 | `0x03` | `SEND_CURRENT` | The reader sends the page on screen now (normal page-text chunks), so a companion that just connected can start reading without waiting for a page turn. A companion that receives the page it is already reading (e.g. after a reconnect) should keep going, not restart. |
+| `0x04` | `HIGHLIGHT` | Followed by four little-endian u16: chapter, page (as in book info `ch`/`pg`), first and last word to underline. Words are numbered in the page text (words joined by single spaces, 0-based). `first = 0xFFFF` clears. Ignored unless chapter/page match the page on screen. The X4 draws the underline into its framebuffer and does a fast refresh (no full re-render; the full-refresh cadence is untouched). |
 
 A preview uses the page-text format with `0x80` set on every `seq` byte
 (`[0x80|seq][total][utf8…]`). An empty preview (`[0x80][0x01]`) means the next

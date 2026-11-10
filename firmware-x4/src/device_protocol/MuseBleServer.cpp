@@ -25,6 +25,7 @@ static constexpr size_t   MAX_TEXT               = 4096;
 static constexpr uint8_t  CMD_NEXT_PAGE          = 0x01;
 static constexpr uint8_t  CMD_PEEK_NEXT          = 0x02;
 static constexpr uint8_t  CMD_SEND_CURRENT       = 0x03;
+static constexpr uint8_t  CMD_HIGHLIGHT          = 0x04;  // + ch, page, first, last word (u16 LE each)
 static constexpr uint8_t  PREVIEW_FLAG           = 0x80;  // set on seq for next-page previews
 static constexpr uint32_t TURN_REQUEST_TTL_MS    = 3000;
 
@@ -55,6 +56,10 @@ static std::atomic<uint32_t>   _turnRequestMs{0};
 static std::atomic<uint32_t>   _lastControlMs{0};
 static std::atomic<uint32_t>   _peekRequestMs{0};
 static std::atomic<uint32_t>   _currentRequestMs{0};
+// Latest follow-along highlight request (only the newest matters), handed to the reader loop.
+static uint16_t                _hl[4]           = {0, 0, 0, 0};
+static bool                    _hlPending       = false;
+static portMUX_TYPE            _hlMux           = portMUX_INITIALIZER_UNLOCKED;
 
 // millis() with 0 reserved for "never".
 static uint32_t nowStamp() { const uint32_t t = millis(); return t ? t : 1; }
@@ -68,6 +73,12 @@ class ControlCallbacks : public NimBLECharacteristicCallbacks {
         if (v.data()[0] == CMD_NEXT_PAGE) {
             _turnRequestMs.store(now);
             muse_trace_log("CTRL", "next page requested");
+        } else if (v.data()[0] == CMD_HIGHLIGHT && v.length() >= 9) {
+            const uint8_t* d = v.data() + 1;
+            portENTER_CRITICAL(&_hlMux);
+            for (int i = 0; i < 4; ++i) _hl[i] = static_cast<uint16_t>(d[2 * i] | (d[2 * i + 1] << 8));
+            _hlPending = true;
+            portEXIT_CRITICAL(&_hlMux);
         } else if (v.data()[0] == CMD_SEND_CURRENT) {
             _currentRequestMs.store(now);
             muse_trace_log("CTRL", "current page requested");
@@ -232,6 +243,21 @@ size_t MuseBleServer::takeBookNotes(char* out, size_t cap) {
     }
     portEXIT_CRITICAL(&_notesMux);
     return n;
+}
+
+bool MuseBleServer::takeHighlight(uint16_t& chapter, uint16_t& page, uint16_t& first, uint16_t& last) {
+    bool pending;
+    portENTER_CRITICAL(&_hlMux);
+    pending = _hlPending;
+    if (pending) {
+        chapter = _hl[0];
+        page = _hl[1];
+        first = _hl[2];
+        last = _hl[3];
+        _hlPending = false;
+    }
+    portEXIT_CRITICAL(&_hlMux);
+    return pending;
 }
 
 bool MuseBleServer::takeCurrentPageRequest() {
