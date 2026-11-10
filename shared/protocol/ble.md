@@ -13,6 +13,8 @@ name and service UUID are stable across firmware updates.
 |------|------|
 | Service | `4D555345-0001-1000-8000-000000000000` |
 | Page-text characteristic | `4D555345-0002-1000-8000-000000000000` |
+| Book-info characteristic | `4D555345-0003-1000-8000-000000000000` |
+| Book-notes characteristic | `4D555345-0005-1000-8000-000000000000` |
 | Control characteristic | `4D555345-0004-1000-8000-000000000000` |
 
 UUID mnemonic: first 4 bytes = **MUSE** in ASCII (4D 55 53 45).
@@ -48,6 +50,43 @@ chunk 1: [0x01][0x02][remaining 170 bytes…]
 ```
 
 Inter-chunk delay: 5 ms (firmware-side `delay(5)` between `notify()` calls).
+
+## Book-info characteristic
+
+**Properties:** READ, NOTIFY. Notified just **before** each page's text (page turns and
+`SEND_CURRENT`; not for previews), and readable at any time. Value: compact UTF-8 JSON,
+one packet (title cut to 80 bytes and author to 50, at a character boundary):
+
+```json
+{"b":"9f3a61c2","ch":4,"chs":31,"pg":12,"last":0,"t":"The Art of Strategy","a":"Dixit, Nalebuff"}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `b` | Book id: FNV-1a 32-bit hash of the book's file path (stable per book; the path is not sent) |
+| `ch` / `chs` | Chapter (spine item) index, and number of spine items |
+| `pg` | Page index within the chapter |
+| `last` | `1` on the chapter's last page (known only once the chapter is fully laid out) |
+| `t` / `a` | Title / author |
+
+Companions use `b` to remember per-book settings (e.g. character voices) and `last` for
+"stop at the end of the chapter". Firmware without it simply lacks the characteristic.
+
+## Book-notes characteristic
+
+**Properties:** READ, WRITE (≤ 512 bytes; long writes). Companion-defined JSON kept **on the X4**
+per book, so it follows the book to any companion. It must contain the book's id as `"b":"…"`
+(from book info); the reader saves it to `margin.json` in that book's cache folder on the SD
+card (from its main loop, not the BLE task) and ignores notes written for another book.
+Reading returns the open book's notes (empty if none yet).
+
+The companions use it to remember character voices:
+
+```json
+{"b":"9f3a61c2","n":"Bella","g":[["Tavish",1,0],["Mira",0,2]],"v":[["Tavish","Jasper"],["Mira","Luna"]]}
+```
+
+`n` narrator voice; `g` per name: male/female pronoun votes; `v` voice per character.
 
 ## Control characteristic
 
@@ -116,12 +155,6 @@ npx eas-cli build --profile development --platform ios
 # EAS emails an install link (~15 min build in cloud, no Xcode needed)
 npx expo start           # then scan QR from the installed dev app
 ```
-
-## Not yet implemented
-
-Book metadata (title/author/page) is not sent over BLE yet; UUID
-`4D555345-0003-…` is reserved for it. Title and author are available over HTTP
-from `GET /api/reading` meanwhile.
 
 ## WiFi / HTTP endpoint (debug)
 

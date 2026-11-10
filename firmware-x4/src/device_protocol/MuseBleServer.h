@@ -2,6 +2,8 @@
 // Margin/Muse — BLE GATT server that pushes page text to the companion app.
 // Service UUID:        4D555345-0001-1000-8000-000000000000  ("MUSE")
 // Page-text char UUID: 4D555345-0002-1000-8000-000000000000
+// Book-info char UUID: 4D555345-0003-1000-8000-000000000000 (JSON: book id, title, chapter)
+// Book-notes char UUID: 4D555345-0005-1000-8000-000000000000 (companion's per-book JSON, on SD)
 // Control char UUID:   4D555345-0004-1000-8000-000000000000
 //                      (write 0x01 = next page, 0x02 = send next page's text without turning,
 //                       0x03 = send the current page's text)
@@ -28,6 +30,16 @@ public:
 
     // True once per companion NEXT_PAGE write, if it is under 3 s old.
     static bool takePageTurnRequest();
+
+    // Book/chapter info for the page about to be sent, as compact JSON (see ble.md); READ + NOTIFY
+    // on 4D555345-0003. Sent before each page's text.
+    static void notifyBookInfo(const char* json, size_t len);
+
+    // Per-book companion notes (e.g. remembered character voices), READ + WRITE on 4D555345-0005,
+    // at most 512 bytes. setBookNotes() publishes the open book's notes for reading;
+    // takeBookNotes() returns notes the companion wrote (0 if none), for the reader to save.
+    static void setBookNotes(const char* data, size_t len);
+    static size_t takeBookNotes(char* out, size_t cap);
 
     // True once per companion SEND_CURRENT write (0x03), if it is under 3 s old.
     static bool takeCurrentPageRequest();

@@ -1,5 +1,5 @@
 diff --git a/src/activities/reader/EpubReaderActivity.cpp b/src/activities/reader/EpubReaderActivity.cpp
-index cee0dc72..283e0fff 100644
+index cee0dc72..f8f58691 100644
 --- a/src/activities/reader/EpubReaderActivity.cpp
 +++ b/src/activities/reader/EpubReaderActivity.cpp
 @@ -1,4 +1,6 @@
@@ -9,7 +9,7 @@ index cee0dc72..283e0fff 100644
  
  #include <Epub/Page.h>
  #include <Epub/blocks/TextBlock.h>
-@@ -288,6 +290,24 @@ void EpubReaderActivity::openDictionaryWordSelect() {
+@@ -288,6 +290,95 @@ void EpubReaderActivity::openDictionaryWordSelect() {
                           [this](const ActivityResult&) { requestUpdate(); });
  }
  
@@ -31,10 +31,81 @@ index cee0dc72..283e0fff 100644
 +  return true;
 +}
 +
++// Margin/Muse: appends s escaped as a JSON string body, at most maxBytes, cut at a UTF-8 boundary.
++static void museAppendJson(std::string& out, const std::string& s, size_t maxBytes) {
++  size_t n = std::min(s.size(), maxBytes);
++  while (n > 0 && n < s.size() && (static_cast<uint8_t>(s[n]) & 0xC0) == 0x80) --n;
++  for (size_t i = 0; i < n; ++i) {
++    const char c = s[i];
++    if (c == '"' || c == '\\') {
++      out += '\\';
++      out += c;
++    } else {
++      out += static_cast<uint8_t>(c) < 0x20 ? ' ' : c;
++    }
++  }
++}
++
++// Margin/Muse: book/chapter info for the page about to be sent (shared/protocol/ble.md). The book
++// id is an FNV-1a hash of the file path: stable per book, without sending the path itself.
++static uint32_t museBookId(const Epub& epub) {
++  uint32_t id = 2166136261u;
++  for (const char c : epub.getPath()) {
++    id ^= static_cast<uint8_t>(c);
++    id *= 16777619u;
++  }
++  return id;
++}
++
++// Margin/Muse: companion notes for a book (e.g. character voices) live next to the book's cache.
++static char museNotes[513];  // static: keeps it off the small task stack
++static uint32_t museNotesBook = 0;
++
++static void musePublishBookNotes(const Epub& epub, uint32_t id) {
++  if (id == museNotesBook) return;
++  museNotesBook = id;
++  const std::string path = epub.getCachePath() + "/margin.json";
++  size_t n = Storage.exists(path.c_str()) ? Storage.readFileToBuffer(path.c_str(), museNotes, sizeof(museNotes) - 1) : 0;
++  museNotes[n] = '\0';
++  MuseBleServer::setBookNotes(museNotes, n);
++}
++
++static void museSaveBookNotes(const Epub& epub) {
++  const size_t n = MuseBleServer::takeBookNotes(museNotes, sizeof(museNotes));
++  if (n == 0) return;
++  char expect[24];
++  snprintf(expect, sizeof(expect), "\"b\":\"%08lx\"", static_cast<unsigned long>(museBookId(epub)));
++  if (!strstr(museNotes, expect)) {  // written for another book (e.g. one just closed): ignore
++    LOG_DBG("MUSE", "Notes for another book ignored");
++    return;
++  }
++  const std::string path = epub.getCachePath() + "/margin.json";
++  if (!Storage.writeFile(path.c_str(), String(museNotes))) LOG_ERR("MUSE", "Could not save %s", path.c_str());
++  MuseBleServer::setBookNotes(museNotes, n);
++}
++
++static void museSendBookInfo(const Epub& epub, const Section* section, int spineIndex, int page) {
++  const uint32_t id = museBookId(epub);
++  musePublishBookNotes(epub, id);
++  const bool lastInChapter = section && !section->isBuilding() && !section->isPartial() &&
++                             page + 1 >= static_cast<int>(section->pageCount);
++  char head[96];
++  snprintf(head, sizeof(head), "{\"b\":\"%08lx\",\"ch\":%d,\"chs\":%d,\"pg\":%d,\"last\":%d,\"t\":\"",
++           static_cast<unsigned long>(id), spineIndex, epub.getSpineItemsCount(), page, lastInChapter ? 1 : 0);
++  std::string json;
++  json.reserve(240);
++  json += head;
++  museAppendJson(json, epub.getTitle(), 80);
++  json += "\",\"a\":\"";
++  museAppendJson(json, epub.getAuthor(), 50);
++  json += "\"}";
++  MuseBleServer::notifyBookInfo(json.c_str(), json.size());
++}
++
  void EpubReaderActivity::loop() {
    if (!epub) {
      finish();
-@@ -506,6 +526,36 @@ void EpubReaderActivity::loop() {
+@@ -506,6 +597,40 @@ void EpubReaderActivity::loop() {
      return;
    }
  
@@ -46,6 +117,9 @@ index cee0dc72..283e0fff 100644
 +  // Margin/Muse: send the next page's text without turning, so the companion can prepare its
 +  // audio and turn exactly when the current page finishes. Empty preview = not available yet
 +  // (next chapter not laid out); the companion then turns first and reads after.
++  // Margin/Muse: save companion notes (written over BLE) for this book.
++  if (!RenderLock::peek()) museSaveBookNotes(*epub);
++
 +  // Margin/Muse: resend the page on screen (a companion that just connected starts reading now).
 +  if (!RenderLock::peek() && MuseBleServer::takeCurrentPageRequest()) {
 +    std::string pageText;
@@ -53,6 +127,7 @@ index cee0dc72..283e0fff 100644
 +        section->currentPage < static_cast<int>(section->pageCount)) {
 +      RenderLock lock;
 +      if (museLoadPageText(*section, section->currentPage, pageText)) {
++        museSendBookInfo(*epub, section.get(), currentSpineIndex, section->currentPage);
 +        MuseBleServer::notifyPageText(pageText.c_str(), pageText.size());
 +      }
 +    }
@@ -71,7 +146,7 @@ index cee0dc72..283e0fff 100644
    constexpr unsigned long kMinManualTurnGapMs = 200;
    const bool turnGuardActive = RenderLock::peek() || (millis() - lastPageTurnTime) < kMinManualTurnGapMs;
    if (pendingManualTurn != 0 && !turnGuardActive) {
-@@ -1333,9 +1383,31 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
+@@ -1333,9 +1458,32 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
                   ? currentPageVisibleOffset
                   : section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
    }
@@ -91,6 +166,7 @@ index cee0dc72..283e0fff 100644
 +    if (section && currentPage >= 0 && currentPage < section->pageCount) {
 +      std::string pageText;
 +      if (museLoadPageText(*section, currentPage, pageText)) {
++        museSendBookInfo(*epub, section.get(), spineIndex, currentPage);
 +        MuseBleServer::notifyPageText(pageText.c_str(), pageText.size());  // empty pages too
 +      }
 +    }

@@ -17,6 +17,8 @@
 #define MUSE_SERVICE_UUID   "4D555345-0001-1000-8000-000000000000"
 #define PAGE_TEXT_CHAR_UUID "4D555345-0002-1000-8000-000000000000"
 #define CONTROL_CHAR_UUID   "4D555345-0004-1000-8000-000000000000"
+#define BOOK_INFO_CHAR_UUID "4D555345-0003-1000-8000-000000000000"
+#define BOOK_NOTES_CHAR_UUID "4D555345-0005-1000-8000-000000000000"
 
 static constexpr size_t   CHUNK_PAYLOAD          = 180;
 static constexpr size_t   MAX_TEXT               = 4096;
@@ -39,6 +41,15 @@ static bool                    _initialized     = false;
 static bool                    _clientConnected = false;
 static NimBLEServer*           _server          = nullptr;
 static NimBLECharacteristic*   _pageTextChar    = nullptr;
+static NimBLECharacteristic*   _bookInfoChar    = nullptr;
+static NimBLECharacteristic*   _bookNotesChar   = nullptr;
+// Notes written by the companion, handed from the NimBLE host task to the reader loop (which
+// saves them to SD; no card I/O on the BLE task).
+static constexpr size_t        MAX_NOTES        = 512;
+static char                    _notesIn[MAX_NOTES + 1];
+static size_t                  _notesInLen      = 0;
+static bool                    _notesPending    = false;
+static portMUX_TYPE            _notesMux        = portMUX_INITIALIZER_UNLOCKED;
 // Written from the NimBLE host task, read from the main loop. 0 = none.
 static std::atomic<uint32_t>   _turnRequestMs{0};
 static std::atomic<uint32_t>   _lastControlMs{0};
@@ -109,6 +120,20 @@ static int museGapLogger(ble_gap_event* event, void*) {
     return 0;
 }
 
+class NotesCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr) override {
+        const NimBLEAttValue v = chr->getValue();
+        const size_t n = std::min<size_t>(v.length(), MAX_NOTES);
+        portENTER_CRITICAL(&_notesMux);
+        memcpy(_notesIn, v.data(), n);
+        _notesIn[n] = '\0';
+        _notesInLen = n;
+        _notesPending = true;
+        portEXIT_CRITICAL(&_notesMux);
+        muse_trace_log("NOTES", "received %u bytes", (unsigned)n);
+    }
+};
+
 class MuseCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* srv, ble_gap_conn_desc* desc) override {
         _clientConnected = true;
@@ -142,6 +167,11 @@ static void bleInitTask(void*) {
     muse_trace_log("BLE", "service created");
     _pageTextChar = svc->createCharacteristic(
         PAGE_TEXT_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
+    _bookInfoChar = svc->createCharacteristic(
+        BOOK_INFO_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    _bookNotesChar = svc->createCharacteristic(
+        BOOK_NOTES_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE, MAX_NOTES);
+    _bookNotesChar->setCallbacks(new NotesCallbacks());  // lives as long as the BLE stack
     NimBLECharacteristic* control = svc->createCharacteristic(
         CONTROL_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     // Lives for the life of the BLE stack, like the server callbacks above.
@@ -178,6 +208,30 @@ bool MuseBleServer::isConnected() { return _clientConnected; }
 bool MuseBleServer::takePageTurnRequest() {
     const uint32_t t = _turnRequestMs.exchange(0);
     return t != 0 && millis() - t < TURN_REQUEST_TTL_MS;
+}
+
+void MuseBleServer::notifyBookInfo(const char* json, size_t len) {
+    if (!_initialized || !_bookInfoChar) return;
+    _bookInfoChar->setValue(reinterpret_cast<const uint8_t*>(json), len);  // also readable
+    if (_clientConnected) _bookInfoChar->notify();
+}
+
+void MuseBleServer::setBookNotes(const char* data, size_t len) {
+    if (!_initialized || !_bookNotesChar) return;
+    _bookNotesChar->setValue(reinterpret_cast<const uint8_t*>(data), std::min(len, MAX_NOTES));
+}
+
+size_t MuseBleServer::takeBookNotes(char* out, size_t cap) {
+    size_t n = 0;
+    portENTER_CRITICAL(&_notesMux);
+    if (_notesPending && cap > 0) {
+        n = std::min(_notesInLen, cap - 1);
+        memcpy(out, _notesIn, n);
+        out[n] = '\0';
+        _notesPending = false;
+    }
+    portEXIT_CRITICAL(&_notesMux);
+    return n;
 }
 
 bool MuseBleServer::takeCurrentPageRequest() {
