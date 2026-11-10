@@ -3,7 +3,8 @@
 // Service UUID:        4D555345-0001-1000-8000-000000000000  ("MUSE")
 // Page-text char UUID: 4D555345-0002-1000-8000-000000000000
 // Control char UUID:   4D555345-0004-1000-8000-000000000000
-//                      (write 0x01 = next page, 0x02 = send next page's text without turning)
+//                      (write 0x01 = next page, 0x02 = send next page's text without turning,
+//                       0x03 = send the current page's text)
 //
 // Protocol: each notify carries [seq:u8][total:u8][utf8 payload…]
 // seq 0..(total-1) form a complete page, sent in order; receiver concatenates
@@ -27,6 +28,9 @@ public:
 
     // True once per companion NEXT_PAGE write, if it is under 3 s old.
     static bool takePageTurnRequest();
+
+    // True once per companion SEND_CURRENT write (0x03), if it is under 3 s old.
+    static bool takeCurrentPageRequest();
 
     // True once per companion PEEK_NEXT write, if it is under 3 s old.
     static bool takePeekRequest();

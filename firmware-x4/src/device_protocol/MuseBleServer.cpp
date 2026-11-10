@@ -22,6 +22,7 @@ static constexpr size_t   CHUNK_PAYLOAD          = 180;
 static constexpr size_t   MAX_TEXT               = 4096;
 static constexpr uint8_t  CMD_NEXT_PAGE          = 0x01;
 static constexpr uint8_t  CMD_PEEK_NEXT          = 0x02;
+static constexpr uint8_t  CMD_SEND_CURRENT       = 0x03;
 static constexpr uint8_t  PREVIEW_FLAG           = 0x80;  // set on seq for next-page previews
 static constexpr uint32_t TURN_REQUEST_TTL_MS    = 3000;
 
@@ -42,6 +43,7 @@ static NimBLECharacteristic*   _pageTextChar    = nullptr;
 static std::atomic<uint32_t>   _turnRequestMs{0};
 static std::atomic<uint32_t>   _lastControlMs{0};
 static std::atomic<uint32_t>   _peekRequestMs{0};
+static std::atomic<uint32_t>   _currentRequestMs{0};
 
 // millis() with 0 reserved for "never".
 static uint32_t nowStamp() { const uint32_t t = millis(); return t ? t : 1; }
@@ -55,6 +57,9 @@ class ControlCallbacks : public NimBLECharacteristicCallbacks {
         if (v.data()[0] == CMD_NEXT_PAGE) {
             _turnRequestMs.store(now);
             muse_trace_log("CTRL", "next page requested");
+        } else if (v.data()[0] == CMD_SEND_CURRENT) {
+            _currentRequestMs.store(now);
+            muse_trace_log("CTRL", "current page requested");
         } else if (v.data()[0] == CMD_PEEK_NEXT) {
             _peekRequestMs.store(now);
             muse_trace_log("CTRL", "next page preview requested");
@@ -172,6 +177,11 @@ bool MuseBleServer::isConnected() { return _clientConnected; }
 
 bool MuseBleServer::takePageTurnRequest() {
     const uint32_t t = _turnRequestMs.exchange(0);
+    return t != 0 && millis() - t < TURN_REQUEST_TTL_MS;
+}
+
+bool MuseBleServer::takeCurrentPageRequest() {
+    const uint32_t t = _currentRequestMs.exchange(0);
     return t != 0 && millis() - t < TURN_REQUEST_TTL_MS;
 }
 

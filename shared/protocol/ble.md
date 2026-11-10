@@ -59,6 +59,7 @@ Inter-chunk delay: 5 ms (firmware-side `delay(5)` between `notify()` calls).
 |------|---------|--------|
 | `0x01` | `NEXT_PAGE` | The reader turns forward as if the page-forward button were pressed, through the same debounce. |
 | `0x02` | `PEEK_NEXT` | The reader sends the **next** page's text as a preview, without turning. |
+| `0x03` | `SEND_CURRENT` | The reader sends the page on screen now (normal page-text chunks), so a companion that just connected can start reading without waiting for a page turn. A companion that receives the page it is already reading (e.g. after a reconnect) should keep going, not restart. |
 
 A preview uses the page-text format with `0x80` set on every `seq` byte
 (`[0x80|seq][total][utf8…]`). An empty preview (`[0x80][0x01]`) means the next
@@ -69,7 +70,7 @@ matches), so previews are only sent when asked for.
 
 A `NEXT_PAGE` is ignored outside the reader, on the last page of the book (it
 does not leave the book), and if the reader has not consumed it within 3 s
-(`PEEK_NEXT` likewise expires after 3 s). Any
+(`PEEK_NEXT` and `SEND_CURRENT` likewise expire after 3 s). Any
 control write also holds off auto-sleep for 2 minutes, so the X4 stays awake
 while a companion is reading aloud continuously.
 

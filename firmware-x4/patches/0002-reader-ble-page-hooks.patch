@@ -1,5 +1,5 @@
 diff --git a/src/activities/reader/EpubReaderActivity.cpp b/src/activities/reader/EpubReaderActivity.cpp
-index cee0dc72..ace4b2c6 100644
+index cee0dc72..283e0fff 100644
 --- a/src/activities/reader/EpubReaderActivity.cpp
 +++ b/src/activities/reader/EpubReaderActivity.cpp
 @@ -1,4 +1,6 @@
@@ -34,7 +34,7 @@ index cee0dc72..ace4b2c6 100644
  void EpubReaderActivity::loop() {
    if (!epub) {
      finish();
-@@ -506,6 +526,25 @@ void EpubReaderActivity::loop() {
+@@ -506,6 +526,36 @@ void EpubReaderActivity::loop() {
      return;
    }
  
@@ -46,6 +46,17 @@ index cee0dc72..ace4b2c6 100644
 +  // Margin/Muse: send the next page's text without turning, so the companion can prepare its
 +  // audio and turn exactly when the current page finishes. Empty preview = not available yet
 +  // (next chapter not laid out); the companion then turns first and reads after.
++  // Margin/Muse: resend the page on screen (a companion that just connected starts reading now).
++  if (!RenderLock::peek() && MuseBleServer::takeCurrentPageRequest()) {
++    std::string pageText;
++    if (section && !atEndOfBook && section->currentPage >= 0 &&
++        section->currentPage < static_cast<int>(section->pageCount)) {
++      RenderLock lock;
++      if (museLoadPageText(*section, section->currentPage, pageText)) {
++        MuseBleServer::notifyPageText(pageText.c_str(), pageText.size());
++      }
++    }
++  }
 +  if (!RenderLock::peek() && MuseBleServer::takePeekRequest()) {
 +    std::string nextText;
 +    bool have = false;
@@ -60,7 +71,7 @@ index cee0dc72..ace4b2c6 100644
    constexpr unsigned long kMinManualTurnGapMs = 200;
    const bool turnGuardActive = RenderLock::peek() || (millis() - lastPageTurnTime) < kMinManualTurnGapMs;
    if (pendingManualTurn != 0 && !turnGuardActive) {
-@@ -1333,9 +1372,31 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
+@@ -1333,9 +1383,31 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
                   ? currentPageVisibleOffset
                   : section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
    }
