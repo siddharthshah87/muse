@@ -153,6 +153,7 @@ const PAGE_CHAR = "4d555345-0002-1000-8000-000000000000";
 const CONTROL_CHAR = "4d555345-0004-1000-8000-000000000000";
 const CMD_NEXT_PAGE = 0x01;
 const CMD_PEEK_NEXT = 0x02;  // X4 sends the next page's text without turning (preview)
+const CMD_SEND_CURRENT = 0x03; // X4 sends the page on screen now (start reading on connect)
 const PREVIEW_FLAG = 0x80;   // set on seq bytes of preview chunks
 const NEXT_PAGE_WAIT_MS = 15000; // warn if the X4 hasn't sent the next page by then
 
@@ -420,7 +421,9 @@ function speakSystem(text, onDone) {
 const KITTEN_MODELS = { "kitten-nano": "nano-0.8-int8", "kitten-micro": "micro-0.8" };
 let engine = "system", characters = true;
 const kitten = { worker: null, model: null, ready: false, ctx: null, nextId: 1, jobs: new Map(),
-                 playing: null, sources: [], cast: null };
+                 playing: null, sources: [], cast: null,
+                 rtf: null,          // measured generation speed: seconds of speech per second of work
+                 charsPerSec: 14 };  // measured speaking rate, to estimate a page's length
 
 function kittenAudio() {
   if (!kitten.ctx) {
@@ -436,7 +439,9 @@ function kittenActive() { return engine !== "system" && kitten.ready; }
 function kittenLoad(choice) {
   if (kitten.model === choice && kitten.worker) return;
   if (kitten.worker) kitten.worker.terminate();
-  Object.assign(kitten, { ready: false, model: choice, jobs: new Map(), playing: null, cast: null });
+  const knownSpeed = parseFloat(store.get("rtf." + choice, ""));
+  Object.assign(kitten, { ready: false, model: choice, jobs: new Map(), playing: null, cast: null,
+                          rtf: Number.isFinite(knownSpeed) ? knownSpeed : null });
   ui.kittenStatus.textContent = "Loading the neural voice… the iPhone voice reads until it is ready.";
   log(`loading Kitten ${choice}…`);
   const w = new Worker("./kitten-worker.js", { type: "module" });
@@ -463,8 +468,19 @@ function kittenLoad(choice) {
     const job = kitten.jobs.get(data.id);
     if (!job) return;
     if (data.type === "chunk") {
-      job.chunks.push(data.samples);
-      if (job.onChunk) job.onChunk(data.samples);
+      const chunk = { samples: data.samples, index: data.index };
+      const audioSecs = data.samples.length / 24000;
+      const genSecs = data.at - (job.lastAt || 0);
+      job.lastAt = data.at;
+      if (genSecs > 0.05 && audioSecs > 0.3) {
+        const sample = audioSecs / genSecs;
+        kitten.rtf = kitten.rtf === null ? sample : 0.7 * kitten.rtf + 0.3 * sample;
+        store.set("rtf." + kitten.model, kitten.rtf.toFixed(3)); // so the next visit starts with a good estimate
+        const chars = job.pieces[data.index].text.length;
+        kitten.charsPerSec = 0.8 * kitten.charsPerSec + 0.2 * (chars / audioSecs);
+      }
+      job.chunks.push(chunk);
+      if (job.onChunk) job.onChunk(chunk);
     } else if (data.type === "done" || data.type === "cancelled" || data.type === "error") {
       job.done = true;
       job.failed = data.type === "error";
@@ -487,9 +503,9 @@ function kittenPieces(text) {
 // Starts generating a page's audio (queued behind any page already being generated).
 function kittenPrepare(text) {
   const id = kitten.nextId++;
-  const job = { id, text, chunks: [], done: false, failed: false, onChunk: null, onFinished: null };
-  kitten.jobs.set(id, job);
   const pieces = kittenPieces(text);
+  const job = { id, text, pieces, chunks: [], done: false, failed: false, onChunk: null, onFinished: null };
+  kitten.jobs.set(id, job);
   if (!pieces.length) { job.done = true; return job; }
   kitten.worker.postMessage({ type: "synth", id, pieces, rate: parseFloat(ui.rate.value) });
   return job;
@@ -513,14 +529,47 @@ function kittenStopPlayback() {
   }
 }
 
+// Each generated piece carries some silence at both ends; trim it so pauses come only from
+// pauseAfter() (keeping a little margin so soft consonants aren't clipped).
+function trimSilence(samples) {
+  const threshold = 0.008, margin = Math.round(0.03 * 24000);
+  let a = 0, b = samples.length - 1;
+  while (a < b && Math.abs(samples[a]) < threshold) a++;
+  while (b > a && Math.abs(samples[b]) < threshold) b--;
+  return samples.subarray(Math.max(0, a - margin), Math.min(samples.length, b + 1 + margin));
+}
+
+// Natural pauses: a breath after a sentence, a short one after a comma, almost none between a
+// quote and its "she said".
+function pauseAfter(text) {
+  const t = text.trim();
+  if (/[.!?…]["'”’)\]]*$/.test(t)) return 0.3;
+  if (/[,;:—–-]["'”’)\]]*$/.test(t)) return 0.12;
+  return 0.05;
+}
+
+// Seconds of audio that must be ready before a page starts so it won't run dry mid-page, when this
+// device generates slower than (or barely as fast as) it speaks. Zero when it is comfortably faster.
+// Slower than real time: wait for the whole page, so any pause falls at the turn, not mid-sentence.
+function headStartNeeded(job) {
+  const rtf = kitten.rtf;
+  if (rtf === null || rtf >= 1.3 || job.done) return 0;
+  if (rtf < 1.0) return Infinity;
+  let remainingChars = 0;
+  const ready = new Set(job.chunks.map((c) => c.index));
+  job.pieces.forEach((piece, i) => { if (!ready.has(i)) remainingChars += piece.text.length; });
+  const remainingAudio = remainingChars / kitten.charsPerSec;
+  return Math.max(0, remainingAudio * (1 / rtf - 1) * 1.5) + 0.5;
+}
+
 // Plays a prepared page back to back as its pieces arrive; onDone when the last one has played.
 function kittenPlay(job, token, onDone) {
   kitten.playing = job;
   const ctx = kittenAudio();
   ctx.resume();
-  let playAt = ctx.currentTime + 0.05, scheduled = 0, ended = 0;
+  let playAt = 0, scheduled = 0, ended = 0, started = false, next = 0, waitLogged = false;
   const finishIfDone = () => {
-    if (token !== speakToken || kitten.playing !== job || !job.done || ended < scheduled) return;
+    if (token !== speakToken || kitten.playing !== job || !job.done || ended < scheduled || next < job.chunks.length) return;
     kitten.playing = null;
     kitten.jobs.delete(job.id);
     if (job.failed && scheduled === 0) {
@@ -530,8 +579,8 @@ function kittenPlay(job, token, onDone) {
       onDone();
     }
   };
-  const schedule = (samples) => {
-    if (token !== speakToken || kitten.playing !== job) return;
+  const scheduleOne = (chunk) => {
+    const samples = trimSilence(chunk.samples);
     const buffer = ctx.createBuffer(1, samples.length, 24000);
     buffer.copyToChannel(samples, 0);
     const src = ctx.createBufferSource();
@@ -539,19 +588,38 @@ function kittenPlay(job, token, onDone) {
     src.connect(ctx.destination);
     playAt = Math.max(playAt, ctx.currentTime + 0.02);
     src.start(playAt);
-    playAt += buffer.duration + 0.18; // short breath between sentences
+    playAt += buffer.duration + pauseAfter(job.pieces[chunk.index].text);
     scheduled++;
     kitten.sources.push(src);
     src.onended = () => {
       ended++;
-      kitten.sources = kitten.sources.filter((s) => s !== src);
+      kitten.sources = kitten.sources.filter((x) => x !== src);
       finishIfDone();
     };
   };
-  job.chunks.forEach(schedule);
-  job.onChunk = schedule;
-  job.onFinished = finishIfDone;
-  finishIfDone(); // already finished and empty
+  const pump = () => {
+    if (token !== speakToken || kitten.playing !== job) return;
+    if (!started) {
+      const buffered = job.chunks.reduce((n, c) => n + c.samples.length / 24000, 0);
+      const needed = headStartNeeded(job);
+      if (buffered < needed && !job.done) {
+        if (!waitLogged) {
+          waitLogged = true;
+          log(needed === Infinity
+            ? `preparing the whole page first (generating at ${kitten.rtf.toFixed(2)}× real time)`
+            : `building a ${needed.toFixed(1)} s head start (generating at ${kitten.rtf.toFixed(2)}× real time)`);
+        }
+        return;
+      }
+      started = true;
+      log(`page audio starts: ${buffered.toFixed(1)} s ready, generating at ${kitten.rtf === null ? "?" : kitten.rtf.toFixed(2)}× real time`);
+    }
+    while (next < job.chunks.length) scheduleOne(job.chunks[next++]);
+    finishIfDone();
+  };
+  job.onChunk = pump;
+  job.onFinished = pump;
+  pump();
 }
 
 // The page on screen, not yet read to the end, when the neural voice becomes ready or the engine
@@ -698,6 +766,8 @@ function onPage(text, bytes) {
     return;
   }
   confirmText = null;
+  // The page already on screen (sent again on reconnect): keep going rather than restart it.
+  if (text === lastText && (speaking || pageFinished)) { requestPeek(); return; }
   // Turned by hand onto the page we had prepared: play it as is.
   const prepared = nextPrepared && nextPrepared.text === text ? nextPrepared : null;
   if (nextPrepared && !prepared) { kittenDiscard(nextPrepared.job); heldFragment = ""; } // reader moved elsewhere
@@ -750,6 +820,13 @@ async function attach() {
   log("connected to " + (device.name || device.id) + (controlChar ? " (continuous supported)" : ""));
   renderMode();
   if (turnOwed && mode === "continuous" && !paused) setTimeout(requestNextPage, 300);
+  else if (controlChar) {
+    // Ask for the page on screen so reading starts now, not at the next page turn. On a
+    // reconnect mid-page, onPage() recognises it as the page already being read.
+    const cmd = new Uint8Array([CMD_SEND_CURRENT]);
+    (controlChar.writeValueWithoutResponse ? controlChar.writeValueWithoutResponse(cmd) : controlChar.writeValue(cmd))
+      .catch(() => { /* older firmware: reading starts at the next turn */ });
+  }
 }
 
 async function onDisconnected() {
@@ -803,7 +880,14 @@ ui.connect.addEventListener("click", async () => {
 });
 
 ui.replay.addEventListener("click", () => { paused = false; speakPage(lastText, afterPage); });
-ui.rate.addEventListener("input", () => { ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×"; store.set("rate", ui.rate.value); });
+// Separate speed per engine: the iPhone voice and Kitten speak at different natural paces
+// (Kitten's 1.00× is its own recommended pace).
+function rateKey() { return engine === "system" ? "rate" : "kittenRate"; }
+function loadRate() {
+  ui.rate.value = store.get(rateKey(), engine === "system" ? "0.9" : "1.0");
+  ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×";
+}
+ui.rate.addEventListener("input", () => { ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×"; store.set(rateKey(), ui.rate.value); });
 ui.voice.addEventListener("change", () => {
   store.set("voice", ui.voice.value);
   if (lastText && mode !== "self" && !speaking) { const first = splitForSpeech(lastText)[0]; if (first) speakPage(first); }
@@ -812,6 +896,7 @@ ui.voice.addEventListener("change", () => {
 ui.engine.addEventListener("change", () => {
   engine = ui.engine.value;
   store.set("engine", engine);
+  loadRate();
   log("voice engine: " + (engine === "system" ? "iPhone voice" : `Kitten (${engine.replace("kitten-", "")})`));
   renderVoiceSettings();
   if (engine !== "system") {
@@ -831,14 +916,14 @@ ui.characters.addEventListener("change", () => { characters = ui.characters.chec
 if (!HINTS[mode]) mode = "page";
 engine = KITTEN_MODELS[store.get("engine", "system")] ? store.get("engine", "system") : "system";
 ui.engine.value = engine;
+loadRate();
 ui.kittenVoice.value = store.get("kittenVoice", "Bella");
 characters = store.get("characters", "1") === "1";
 ui.characters.checked = characters;
 renderVoiceSettings();
 log("voice engine: " + (engine === "system" ? "iPhone voice" : `Kitten (${engine.replace("kitten-", "")})`));
 if (engine !== "system") kittenLoad(engine);
-ui.rate.value = store.get("rate", "0.9");
-ui.rateValue.textContent = parseFloat(ui.rate.value).toFixed(2) + "×";
+
 if (synth) { loadVoices(); synth.addEventListener?.("voiceschanged", loadVoices); }
 if (!navigator.bluetooth) {
   ui.unsupported.hidden = false;
