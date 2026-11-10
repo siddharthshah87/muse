@@ -153,6 +153,7 @@
     </select>
     <label class="check"><input type="checkbox" id="characters" checked> Character voices for dialogue</label>
   </div>
+  <label class="check"><input type="checkbox" id="x4-underline" checked> Underline the sentence on the X4</label>
 </div>
 
 <p class="note">The screen stays on while connected. If the phone locks or you switch apps, the connection and speech stop.</p>
@@ -172,6 +173,7 @@ const BOOK_NOTES_CHAR = "4d555345-0005-1000-8000-000000000000"; // per-book note
 const CMD_NEXT_PAGE = 0x01;
 const CMD_PEEK_NEXT = 0x02;  // X4 sends the next page's text without turning (preview)
 const CMD_SEND_CURRENT = 0x03; // X4 sends the page on screen now (start reading on connect)
+const CMD_HIGHLIGHT = 0x04;    // X4 underlines words first..last on chapter/page (follow along on e-ink)
 const PREVIEW_FLAG = 0x80;   // set on seq bytes of preview chunks
 const NEXT_PAGE_WAIT_MS = 15000; // warn if the X4 hasn't sent the next page by then
 
@@ -218,7 +220,7 @@ const ui = {
   voice: $("voice"), voiceSettings: $("voice-settings"), log: $("log"),
   engine: $("engine"), kittenRow: $("kitten-row"), systemVoiceRow: $("system-voice-row"),
   kittenVoice: $("kitten-voice"), kittenStatus: $("kitten-status"), characters: $("characters"),
-  sleep: $("sleep"), sleepLeft: $("sleep-left"),
+  sleep: $("sleep"), sleepLeft: $("sleep-left"), x4Underline: $("x4-underline"),
   unsupported: $("unsupported"), modeHint: $("mode-hint"),
   modeButtons: [...document.querySelectorAll(".modes button")],
 };
@@ -571,7 +573,7 @@ function kittenPieces(text) {
     parts.forEach((part, i) => {
       // Follow-along shows the original words, with the quote marks the dialogue split removed.
       const display = seg.quote ? `${i === 0 ? "“" : ""}${part}${i === parts.length - 1 ? "”" : ""}` : part;
-      pieces.push({ text: pronounce(part), display, voice: seg.voice });
+      pieces.push({ text: pronounce(part), display, raw: part, voice: seg.voice });
     });
   }
   return pieces;
@@ -699,7 +701,7 @@ function kittenPlay(job, token, onDone) {
     while (next < job.chunks.length) scheduleOne(job.chunks[next++]);
     finishIfDone();
   };
-  renderFollow(job.pieces.map((piece) => piece.display));
+  renderFollow(job.pieces.map((piece) => piece.display), job.pieces.map((piece) => piece.raw));
   job.onChunk = pump;
   job.onFinished = pump;
   pump();
@@ -719,9 +721,59 @@ function readCurrentPageIfIdle() {
 // --- Follow along ------------------------------------------------------------------
 // The page text as the sentences being read, the current one highlighted and kept in view.
 let followSpans = [];
-function renderFollow(pieces) {
+let followRanges = []; // per piece: [first, last] word index in the X4's page text, or null
+let followIndex = -1;
+let x4Underline = true;
+
+// The X4 numbers a page's words in its page text (words joined by single spaces). Map our cleaned
+// text (hyphen breaks rejoined) back to those numbers, so a sentence can be underlined on e-ink.
+function wordMap(pageText) {
+  const tokens = pageText.split(" ");
+  let text = "";
+  const wordOf = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok) continue;
+    const joinNext = /[a-z]-$/.test(tok) && /^[a-z]/.test(tokens[i + 1] || ""); // "depart- ment"
+    const body = joinNext ? tok.slice(0, -1) : tok;
+    for (const ch of body) { text += ch; wordOf.push(i); }
+    if (!joinNext && i < tokens.length - 1) { text += " "; wordOf.push(i + 1); }
+  }
+  return { text, wordOf };
+}
+
+function rangesFor(pieces, pageText) {
+  const { text, wordOf } = wordMap(pageText);
+  let cursor = 0;
+  return pieces.map((piece) => {
+    // A word carried over from the previous page isn't on this one: match from the second word.
+    for (const probe of [piece, piece.slice(piece.indexOf(" ") + 1)]) {
+      const at = probe ? text.indexOf(probe, cursor) : -1;
+      if (at >= 0) {
+        cursor = at + probe.length;
+        return [wordOf[at], wordOf[at + probe.length - 1]];
+      }
+    }
+    return null;
+  });
+}
+
+function sendUnderline(range) {
+  if (!x4Underline || !controlChar || !(device && device.gatt.connected) || !bookInfo) return;
+  const [first, last] = range || [0xffff, 0xffff];
+  const b = new Uint8Array(9);
+  const put = (o, v) => { b[o] = v & 0xff; b[o + 1] = (v >> 8) & 0xff; };
+  b[0] = CMD_HIGHLIGHT;
+  put(1, bookInfo.ch); put(3, bookInfo.pg); put(5, first); put(7, last);
+  (controlChar.writeValueWithoutResponse ? controlChar.writeValueWithoutResponse(b) : controlChar.writeValue(b)).catch(() => {});
+}
+function clearUnderline() { followIndex = -1; sendUnderline(null); }
+
+function renderFollow(pieces, rawPieces = pieces) {
   ui.page.textContent = "";
   ui.page.classList.remove("empty");
+  followRanges = rangesFor(rawPieces, lastText);
+  followIndex = -1;
   followSpans = pieces.map((text) => {
     const span = document.createElement("span");
     span.textContent = text + " ";
@@ -733,6 +785,8 @@ function highlight(i) {
   followSpans.forEach((span, j) => span.classList.toggle("now", j === i));
   const span = followSpans[i];
   if (span) span.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  followIndex = i;
+  if (followRanges[i]) sendUnderline(followRanges[i]);
 }
 
 // --- Book info (4D555345-0003) and the cast remembered per book -------------------------
@@ -752,7 +806,9 @@ function onBookInfo(event) {
       sleepNow();
       return;
     }
+    const pageChanged = !bookInfo || bookInfo.ch !== info.ch || bookInfo.pg !== info.pg;
     bookInfo = info;
+    if (pageChanged && followIndex >= 0 && followRanges[followIndex]) sendUnderline(followRanges[followIndex]);
   } catch (e) {
     log("unreadable book info: " + e.message);
   }
@@ -855,6 +911,7 @@ function checkSleep() {
 }
 function sleepNow() {
   log("sleep timer: paused");
+  clearUnderline();
   sleepWhenSentenceEnds = false;
   if (!paused) {
     paused = true;
@@ -966,7 +1023,7 @@ async function requestNextPage() {
 
 function afterPage() {
   if (sleepMode === "chapter" && bookInfo && bookInfo.last) { log("end of the chapter"); sleepNow(); return; }
-  if (mode !== "continuous") { log("page read"); return; }
+  if (mode !== "continuous") { log("page read"); clearUnderline(); return; }
   const next = nextPrepared;
   nextPrepared = null;
   if (next && !paused) {
@@ -985,7 +1042,7 @@ function renderPause() {
 ui.pause.addEventListener("click", () => {
   paused = !paused;
   clearWait();
-  if (paused) { stopSpeech(); resetPreviews(); setStatus("connected", device && device.gatt.connected ? "Paused" : "Disconnected"); }
+  if (paused) { stopSpeech(); resetPreviews(); clearUnderline(); setStatus("connected", device && device.gatt.connected ? "Paused" : "Disconnected"); }
   else { if (device && device.gatt.connected) setStatus("connected", "Connected"); speakPage(lastText, afterPage); requestPeek(); }
   renderPause();
 });
@@ -1162,6 +1219,12 @@ ui.engine.addEventListener("change", () => {
 });
 ui.kittenVoice.addEventListener("change", () => { store.set("kittenVoice", ui.kittenVoice.value); kitten.cast = null; });
 ui.sleep.addEventListener("change", () => setSleep(ui.sleep.value));
+ui.x4Underline.addEventListener("change", () => {
+  if (!ui.x4Underline.checked) clearUnderline();
+  x4Underline = ui.x4Underline.checked;
+  store.set("x4Underline", x4Underline ? "1" : "0");
+  if (x4Underline && followIndex >= 0 && followRanges[followIndex]) sendUnderline(followRanges[followIndex]);
+});
 ui.characters.addEventListener("change", () => { characters = ui.characters.checked; store.set("characters", characters ? "1" : "0"); });
 
 // --- Init ------------------------------------------------------------------
@@ -1171,6 +1234,8 @@ ui.engine.value = engine;
 loadRate();
 ui.kittenVoice.value = store.get("kittenVoice", "Bella");
 characters = store.get("characters", "1") === "1";
+x4Underline = store.get("x4Underline", "1") === "1";
+ui.x4Underline.checked = x4Underline;
 ui.characters.checked = characters;
 renderVoiceSettings();
 log("voice engine: " + (engine === "system" ? "iPhone voice" : `Kitten (${engine.replace("kitten-", "")})`));
