@@ -56,6 +56,19 @@
       this.recent = []; // speaker keys, newest last
     }
 
+    // What to remember per book: who is male/female and who has which voice.
+    toJSON() {
+      return { narrator: this.narrator, votes: [...this.votes], voices: [...this.voices] };
+    }
+
+    static fromJSON(saved, narrator) {
+      const cast = new Cast(narrator);
+      cast.votes = new Map(saved.votes || []);
+      // Keep characters' voices unless the narrator changed (a character might now share it).
+      if (saved.narrator === narrator) cast.voices = new Map(saved.voices || []);
+      return cast;
+    }
+
     learn(text) {
       for (const sentence of text.split(/(?<=[.!?…])\s+/)) {
         const m = sentence.match(LEARN);
@@ -152,7 +165,7 @@
     const mentions = [];
     segs.forEach((seg, i) => {
       if (!seg.quote) {
-        result.push({ text: seg.text.trim(), voice: cast.narrator });
+        result.push({ text: seg.text.trim(), voice: cast.narrator, quote: false });
         for (const m of seg.text.match(NAME_RE) || []) if (!NOT_NAMES.has(m.split(" ")[0])) mentions.push(m);
         return;
       }
@@ -167,11 +180,12 @@
         if (b) who = b[1];
       }
       if (who && NOT_NAMES.has(who.split(" ")[0]) && !/^(he|she)$/i.test(who)) who = null;
-      result.push({ text: seg.text.trim(), voice: cast.speakerVoice(who, mentions.slice(-3)) });
+      result.push({ text: seg.text.trim(), voice: cast.speakerVoice(who, mentions.slice(-3)), quote: true });
     });
     const merged = [];
     for (const r of result) {
-      if (merged.length && merged[merged.length - 1].voice === r.voice) merged[merged.length - 1].text += " " + r.text;
+      const last = merged[merged.length - 1];
+      if (last && last.voice === r.voice && last.quote === r.quote) last.text += " " + r.text;
       else merged.push({ ...r });
     }
     return merged;

@@ -65,6 +65,11 @@
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-top: 16px; }
   .page-meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; gap: 8px; }
   #page { font: 19px/1.6 Georgia, "Times New Roman", serif; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 4em; }
+  #page span { border-radius: 4px; transition: background-color .2s; }
+  #page span.now { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .sleep-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .sleep-row select { flex: 1; }
+  .sleep-row span { font-size: 14px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
   #page.empty { color: var(--muted); font-style: italic; }
   .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
   label { display: block; font-size: 14px; color: var(--muted); margin: 14px 0 6px; }
@@ -111,6 +116,17 @@
   <button id="replay" class="secondary" disabled>Replay page</button>
   <button id="pause" class="secondary" disabled>Pause</button>
 </div>
+<div class="sleep-row">
+  <label for="sleep" style="margin:0">Sleep</label>
+  <select id="sleep">
+    <option value="off">Off</option>
+    <option value="10">in 10 minutes</option><option value="20">in 20 minutes</option>
+    <option value="30">in 30 minutes</option><option value="45">in 45 minutes</option>
+    <option value="60">in 60 minutes</option>
+    <option value="chapter">at the end of the chapter</option>
+  </select>
+  <span id="sleep-left"></span>
+</div>
 
 <div class="voice-settings" id="voice-settings">
   <label for="rate">Speed</label>
@@ -151,6 +167,8 @@
 const SERVICE = "4d555345-0001-1000-8000-000000000000";
 const PAGE_CHAR = "4d555345-0002-1000-8000-000000000000";
 const CONTROL_CHAR = "4d555345-0004-1000-8000-000000000000";
+const BOOK_INFO_CHAR = "4d555345-0003-1000-8000-000000000000";
+const BOOK_NOTES_CHAR = "4d555345-0005-1000-8000-000000000000"; // per-book notes stored on the X4
 const CMD_NEXT_PAGE = 0x01;
 const CMD_PEEK_NEXT = 0x02;  // X4 sends the next page's text without turning (preview)
 const CMD_SEND_CURRENT = 0x03; // X4 sends the page on screen now (start reading on connect)
@@ -200,6 +218,7 @@ const ui = {
   voice: $("voice"), voiceSettings: $("voice-settings"), log: $("log"),
   engine: $("engine"), kittenRow: $("kitten-row"), systemVoiceRow: $("system-voice-row"),
   kittenVoice: $("kitten-voice"), kittenStatus: $("kitten-status"), characters: $("characters"),
+  sleep: $("sleep"), sleepLeft: $("sleep-left"),
   unsupported: $("unsupported"), modeHint: $("mode-hint"),
   modeButtons: [...document.querySelectorAll(".modes button")],
 };
@@ -327,17 +346,59 @@ function pageSpeech(text) {
   return t;
 }
 
+// --- Pronunciation -------------------------------------------------------------
+// Book text as it should be heard. Applied per piece, after splitting, so follow-along can
+// show the original words.
+const ABBREVIATIONS = [
+  [/\bMr\./g, "Mister"], [/\bMrs\./g, "Missus"], [/\bMs\./g, "Miz"], [/\bDr\./g, "Doctor"],
+  [/\bProf\./g, "Professor"], [/\bSt\.(?= [A-Z])/g, "Saint"], [/\bJr\./g, "Junior"], [/\bSr\./g, "Senior"],
+  [/\be\.g\./gi, "for example"], [/\bi\.e\./gi, "that is"], [/\betc\./gi, "et cetera"],
+  [/\bvs\./gi, "versus"], [/\bNo\.(?= ?\d)/g, "Number"],
+];
+function romanToInt(r) {
+  const v = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+  let n = 0;
+  for (let i = 0; i < r.length; i++) n += v[r[i]] < (v[r[i + 1]] || 0) ? -v[r[i]] : v[r[i]];
+  return n > 0 && n < 4000 ? n : 0;
+}
+function pronounce(text) {
+  let t = text
+    .replace(/[¹²³⁰-⁹]+/g, "")      // superscript footnote markers
+    .replace(/\[\d{1,3}\]/g, "")                              // [12]
+    .replace(/([.,;:!?”"’])\d{1,3}(?=\s|$)/g, "$1");          // "said.12 " → "said. "
+  for (const [re, word] of ABBREVIATIONS) t = t.replace(re, word);
+  t = t.replace(/\b([A-Z])\.(?= ?[A-Z])/g, "$1");  // J. R. R. Tolkien → J R R Tolkien
+  t = t.replace(/\b(Chapter|CHAPTER|Book|BOOK|Part|PART|Volume|VOLUME|Act|ACT|Section|SECTION)\s+([IVXLCDM]+)\b/g,
+    (m, word, r) => (romanToInt(r) ? `${word} ${romanToInt(r)}` : m));
+  // HEADINGS read as words: runs of capitalised words, and single long ones (short ones may be acronyms).
+  const titleCase = (w) => w[0] + w.slice(1).toLowerCase();
+  t = t.replace(/\b[A-Z][A-Z'’]+(?:\s+[A-Z][A-Z'’]+)+\b/g, (run) => run.split(/(\s+)/).map((w) => (/\S/.test(w) ? titleCase(w) : w)).join(""));
+  t = t.replace(/\b[A-Z]{4,}\b/g, titleCase);
+  return t;
+}
+
+// Periods that don't end a sentence (Mr., e.g., initials) are hidden while splitting.
+const NOT_A_STOP = "";
+function protectAbbreviations(t) {
+  return t
+    .replace(/\b(Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|No)\./g, `$1${NOT_A_STOP}`)
+    .replace(/\b([eE])\.([gG])\./g, `$1${NOT_A_STOP}$2${NOT_A_STOP}`)
+    .replace(/\b([iI])\.([eE])\./g, `$1${NOT_A_STOP}$2${NOT_A_STOP}`)
+    .replace(/\b([A-Z])\.(?= ?[A-Z])/g, `$1${NOT_A_STOP}`);
+}
+
+// Splits text into sentence-sized pieces (original words; see pronounce() for speech).
 function splitForSpeech(text) {
-  const sentences = cleanForSpeech(text).match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*|$)\s*/g) || [];
+  const sentences = protectAbbreviations(cleanForSpeech(text)).match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*|$)\s*/g) || [];
   const pieces = [];
   let cur = "";
   for (const s of sentences) {
-    if (cur && (cur + s).length > 220) { pieces.push(cur.trim()); cur = ""; }
     cur += s;
+    if (cur.trim().length >= 30) { pieces.push(cur.trim()); cur = ""; } // one sentence per piece (follow along)
   }
   if (cur.trim()) pieces.push(cur.trim());
   // iOS skips text with nothing to pronounce (a lone "”", "—" or "*") without firing any events.
-  return pieces.filter((piece) => /[\p{L}\p{N}]/u.test(piece));
+  return pieces.map((piece) => piece.split(NOT_A_STOP).join(".")).filter((piece) => /[\p{L}\p{N}]/u.test(piece));
 }
 
 function stopSpeech() {
@@ -378,6 +439,7 @@ function speakSystem(text, onDone) {
   if (!synth) return;
   const pieces = splitForSpeech(text);
   if (!pieces.length) { onDone && onDone(); return; }
+  renderFollow(pieces);
   const token = speakToken;
   speaking = true;
   renderPause();
@@ -391,13 +453,17 @@ function speakSystem(text, onDone) {
     onDone && onDone();
   };
   pieces.forEach((piece, i) => {
-    const u = makeUtterance(piece);
+    const u = makeUtterance(pronounce(piece));
     u.onerror = (e) => {
       if (token !== speakToken) return;
       if (e.error !== "interrupted" && e.error !== "canceled") log("speech error: " + e.error);
     };
-    u.onstart = () => { anyStarted = true; };
-    if (i === pieces.length - 1) u.onend = finish;
+    u.onstart = () => { anyStarted = true; if (token === speakToken) highlight(i); };
+    u.onend = () => {
+      if (token !== speakToken) return;
+      if (sleepWhenSentenceEnds) { sleepNow(); return; } // sleep timer: stop at the end of this sentence
+      if (i === pieces.length - 1) finish();
+    };
     try { synth.speak(u); } catch (e) { log("speech failed: " + e.message); }
   });
   // iOS sometimes never fires onend for the last utterance, or skips it. Once speech on this page
@@ -422,6 +488,7 @@ const KITTEN_MODELS = { "kitten-nano": "nano-0.8-int8", "kitten-micro": "micro-0
 let engine = "system", characters = true;
 const kitten = { worker: null, model: null, ready: false, ctx: null, nextId: 1, jobs: new Map(),
                  playing: null, sources: [], cast: null,
+                 highlightTimers: [], master: null,
                  rtf: null,          // measured generation speed: seconds of speech per second of work
                  charsPerSec: 14 };  // measured speaking rate, to estimate a page's length
 
@@ -430,6 +497,8 @@ function kittenAudio() {
     // Let Web Audio play with the ringer switch on silent, like speech does (Safari audio session API).
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch {}
     kitten.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    kitten.master = kitten.ctx.createGain(); // the sleep timer fades this out
+    kitten.master.connect(kitten.ctx.destination);
   }
   return kitten.ctx;
 }
@@ -493,10 +562,18 @@ function kittenLoad(choice) {
 
 function kittenPieces(text) {
   const narrator = ui.kittenVoice.value;
-  if (!kitten.cast || kitten.cast.narrator !== narrator) kitten.cast = new MarginDialogue.Cast(narrator);
-  const segments = characters ? MarginDialogue.assignVoices(text, kitten.cast) : [{ text, voice: narrator }];
+  const cast = castForBook(narrator);
+  const segments = characters ? MarginDialogue.assignVoices(text, cast) : [{ text, voice: narrator, quote: false }];
+  if (characters) saveCast();
   const pieces = [];
-  for (const seg of segments) for (const piece of splitForSpeech(seg.text)) pieces.push({ text: piece, voice: seg.voice });
+  for (const seg of segments) {
+    const parts = splitForSpeech(seg.text);
+    parts.forEach((part, i) => {
+      // Follow-along shows the original words, with the quote marks the dialogue split removed.
+      const display = seg.quote ? `${i === 0 ? "“" : ""}${part}${i === parts.length - 1 ? "”" : ""}` : part;
+      pieces.push({ text: pronounce(part), display, voice: seg.voice });
+    });
+  }
   return pieces;
 }
 
@@ -520,6 +597,8 @@ function kittenDiscard(job) {
 function kittenStopPlayback() {
   for (const src of kitten.sources) { src.onended = null; try { src.stop(); } catch {} }
   kitten.sources = [];
+  kitten.highlightTimers.forEach(clearTimeout);
+  kitten.highlightTimers = [];
   if (kitten.playing) {
     const job = kitten.playing;
     kitten.playing = null;
@@ -585,9 +664,12 @@ function kittenPlay(job, token, onDone) {
     buffer.copyToChannel(samples, 0);
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.connect(ctx.destination);
+    src.connect(kitten.master);
     playAt = Math.max(playAt, ctx.currentTime + 0.02);
     src.start(playAt);
+    const index = chunk.index;
+    kitten.highlightTimers.push(setTimeout(() => { if (token === speakToken) highlight(index); },
+                                           Math.max(0, (playAt - ctx.currentTime) * 1000)));
     playAt += buffer.duration + pauseAfter(job.pieces[chunk.index].text);
     scheduled++;
     kitten.sources.push(src);
@@ -617,6 +699,7 @@ function kittenPlay(job, token, onDone) {
     while (next < job.chunks.length) scheduleOne(job.chunks[next++]);
     finishIfDone();
   };
+  renderFollow(job.pieces.map((piece) => piece.display));
   job.onChunk = pump;
   job.onFinished = pump;
   pump();
@@ -631,6 +714,163 @@ function readCurrentPageIfIdle() {
   resetPreviews();
   speakPage(cleanForSpeech(lastText), afterPage);
   requestPeek();
+}
+
+// --- Follow along ------------------------------------------------------------------
+// The page text as the sentences being read, the current one highlighted and kept in view.
+let followSpans = [];
+function renderFollow(pieces) {
+  ui.page.textContent = "";
+  ui.page.classList.remove("empty");
+  followSpans = pieces.map((text) => {
+    const span = document.createElement("span");
+    span.textContent = text + " ";
+    ui.page.appendChild(span);
+    return span;
+  });
+}
+function highlight(i) {
+  followSpans.forEach((span, j) => span.classList.toggle("now", j === i));
+  const span = followSpans[i];
+  if (span) span.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+// --- Book info (4D555345-0003) and the cast remembered per book -------------------------
+let bookInfo = null; // {b: book id, t: title, a: author, ch, chs, pg, last}
+function onBookInfo(event) {
+  const dv = event.target.value;
+  try {
+    const info = JSON.parse(new TextDecoder().decode(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)));
+    if (!bookInfo || bookInfo.b !== info.b) {
+      log(`book: ${info.t || "untitled"}${info.a ? " — " + info.a : ""}`);
+      if (bookInfo && (!bookNotes || bookNotes.b !== info.b)) readBookNotes(); // switched books mid-session
+    }
+    // Fallback for "sleep at end of chapter" when the X4 couldn't flag the last page in advance.
+    if (sleepMode === "chapter" && bookInfo && bookInfo.b === info.b && info.ch !== bookInfo.ch && speaking) {
+      log("new chapter; sleep timer stopping");
+      bookInfo = info;
+      sleepNow();
+      return;
+    }
+    bookInfo = info;
+  } catch (e) {
+    log("unreadable book info: " + e.message);
+  }
+}
+// The cast (who is male/female, who has which voice) is stored on the X4 next to the book, so it
+// follows the book to any phone or companion. Compact form, ≤ 512 bytes (see ble.md).
+let notesChar = null;
+let bookNotes = null;      // last notes read from / written to the X4: {b, n, g, v}
+let lastNotesJson = "";
+
+function castToNotes(cast, bookId) {
+  const notes = {
+    b: bookId,
+    n: cast.narrator,
+    g: [...cast.votes].map(([name, v]) => [name, v.m, v.f]),
+    v: [...cast.voices].filter(([name]) => !name.startsWith("<")),
+  };
+  // Keep the most recent characters if a long book outgrows the space.
+  while (new TextEncoder().encode(JSON.stringify(notes)).length > 500 && (notes.g.length || notes.v.length)) {
+    if (notes.g.length > notes.v.length) notes.g.shift(); else notes.v.shift();
+  }
+  return notes;
+}
+
+function notesToCast(notes, narrator) {
+  return MarginDialogue.Cast.fromJSON({
+    narrator: notes.n,
+    votes: (notes.g || []).map(([name, m, f]) => [name, { m, f }]),
+    voices: notes.v || [],
+  }, narrator);
+}
+
+async function readBookNotes() {
+  if (!notesChar) return;
+  try {
+    const dv = await notesChar.readValue();
+    const text = new TextDecoder().decode(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)).trim();
+    bookNotes = text ? JSON.parse(text) : null;
+    lastNotesJson = text;
+    kitten.cast = null; // rebuilt from the notes for the next page
+    if (bookNotes && bookNotes.v) log(`the X4 remembers ${bookNotes.v.length} character voice${bookNotes.v.length === 1 ? "" : "s"} for this book`);
+  } catch (e) {
+    bookNotes = null;
+    log("couldn't read the book's saved voices: " + describeError(e));
+  }
+}
+
+function castForBook(narrator) {
+  const key = bookInfo ? bookInfo.b : null;
+  if (kitten.cast && kitten.castKey === key && kitten.cast.narrator === narrator) return kitten.cast;
+  kitten.cast = bookNotes && key && bookNotes.b === key ? notesToCast(bookNotes, narrator) : new MarginDialogue.Cast(narrator);
+  kitten.castKey = key;
+  return kitten.cast;
+}
+
+function saveCast() {
+  if (!kitten.cast || !kitten.castKey || !notesChar) return;
+  const notes = castToNotes(kitten.cast, kitten.castKey);
+  const json = JSON.stringify(notes);
+  if (json === lastNotesJson) return; // nothing new learned on this page
+  lastNotesJson = json;
+  bookNotes = notes;
+  notesChar.writeValue(new TextEncoder().encode(json)).catch((e) => log("couldn't save voices to the X4: " + describeError(e)));
+}
+
+// --- Sleep timer ---------------------------------------------------------------------
+let sleepMode = "off", sleepAt = 0, sleepTick = null, sleepWhenSentenceEnds = false;
+function setSleep(value) {
+  sleepMode = value;
+  clearInterval(sleepTick);
+  sleepAt = 0;
+  sleepWhenSentenceEnds = false;
+  if (/^\d+$/.test(value)) {
+    sleepAt = Date.now() + Number(value) * 60000;
+    sleepTick = setInterval(checkSleep, 1000);
+  }
+  if (value !== "off") log(value === "chapter" ? "sleep at the end of this chapter" : `sleep in ${value} minutes`);
+  renderSleep();
+}
+function renderSleep() {
+  ui.sleep.value = sleepMode;
+  ui.sleepLeft.textContent = sleepAt ? `${Math.max(0, Math.ceil((sleepAt - Date.now()) / 60000))} min left` : "";
+}
+function checkSleep() {
+  if (!sleepAt) return;
+  if (Date.now() < sleepAt) { renderSleep(); return; }
+  sleepAt = 0;
+  clearInterval(sleepTick);
+  if (!speaking) { sleepNow(); return; }
+  if (kittenActive() && kitten.master) {
+    // Fade out over a few seconds, then pause.
+    const gain = kitten.master.gain, now = kitten.ctx.currentTime;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(gain.value, now);
+    gain.linearRampToValueAtTime(0, now + 6);
+    setTimeout(sleepNow, 6200);
+  } else {
+    sleepWhenSentenceEnds = true; // the iPhone voice stops after the sentence it is reading
+  }
+}
+function sleepNow() {
+  log("sleep timer: paused");
+  sleepWhenSentenceEnds = false;
+  if (!paused) {
+    paused = true;
+    clearWait();
+    stopSpeech();
+    resetPreviews();
+  }
+  if (kitten.master) {
+    const now = kitten.ctx.currentTime;
+    kitten.master.gain.cancelScheduledValues(now);
+    kitten.master.gain.setValueAtTime(1, now);
+  }
+  setStatus("connected", device && device.gatt.connected ? "Paused (sleep timer)" : "Disconnected");
+  sleepMode = "off";
+  renderSleep();
+  renderPause();
 }
 
 function renderVoiceSettings() {
@@ -689,7 +929,7 @@ function showPage(text) {
   pageFinished = false;
   ui.page.textContent = text;
   ui.page.classList.remove("empty");
-  ui.pageLabel.textContent = `Page ${pages}`;
+  ui.pageLabel.textContent = bookInfo ? `${bookInfo.t || "Page " + pages} · ch. ${bookInfo.ch + 1}` : `Page ${pages}`;
   ui.replay.disabled = false;
   updateStats();
   renderPause();
@@ -725,6 +965,7 @@ async function requestNextPage() {
 }
 
 function afterPage() {
+  if (sleepMode === "chapter" && bookInfo && bookInfo.last) { log("end of the chapter"); sleepNow(); return; }
   if (mode !== "continuous") { log("page read"); return; }
   const next = nextPrepared;
   nextPrepared = null;
@@ -810,6 +1051,16 @@ async function attach() {
   if (!controlChar && mode === "continuous") { mode = "page"; store.set("mode", mode); }
   ch.removeEventListener("characteristicvaluechanged", onChunk);
   ch.addEventListener("characteristicvaluechanged", onChunk);
+  try {
+    const info = await service.getCharacteristic(BOOK_INFO_CHAR);
+    info.removeEventListener("characteristicvaluechanged", onBookInfo);
+    info.addEventListener("characteristicvaluechanged", onBookInfo);
+    await info.startNotifications();
+  } catch { /* older firmware: no book info (no end-of-chapter sleep) */ }
+  try {
+    notesChar = await service.getCharacteristic(BOOK_NOTES_CHAR);
+    await readBookNotes(); // before the first page, so its characters keep their voices
+  } catch { notesChar = null; /* older firmware: voices are not remembered between sessions */ }
   await ch.startNotifications();
   assembler.reset();
   heldFragment = "";
@@ -910,6 +1161,7 @@ ui.engine.addEventListener("change", () => {
   }
 });
 ui.kittenVoice.addEventListener("change", () => { store.set("kittenVoice", ui.kittenVoice.value); kitten.cast = null; });
+ui.sleep.addEventListener("change", () => setSleep(ui.sleep.value));
 ui.characters.addEventListener("change", () => { characters = ui.characters.checked; store.set("characters", characters ? "1" : "0"); });
 
 // --- Init ------------------------------------------------------------------
